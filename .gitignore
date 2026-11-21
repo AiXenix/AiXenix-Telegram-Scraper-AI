@@ -1,0 +1,32 @@
+# Dependencies and build output
+node_modules/
+bb-plugin/dist/
+bb-plugin/standalone-src/dist/
+
+# Your settings, secrets and data: never commit these
+newsdesk.config*
+!newsdesk.config.example.json
+*.tmp
+*.bak
+*.orig
+*~
+*.swp
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.session
+*.session-journal
+.env
+.env.*
+*.pem
+*.key
+
+# Logs and local files
+*.log
+logs/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

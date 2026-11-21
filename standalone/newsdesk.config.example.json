@@ -1,0 +1,45 @@
+{
+  "telegram": {
+    "botToken": "PASTE_BOT_TOKEN_FROM_BOTFATHER",
+    "channel": "@your_channel",
+    "ownerChatId": null,
+    "apiBase": "https://api.telegram.org"
+  },
+  "sources": [
+    "@first_source_channel",
+    "@second_source_channel"
+  ],
+  "llm": {
+    "backend": "openai",
+    "filterModel": "MODEL_FOR_FILTERING",
+    "writerModel": "MODEL_FOR_WRITING",
+    "filterReasoning": "low",
+    "writerReasoning": "medium",
+    "bbUrl": "",
+    "bbToken": "",
+    "apiBaseUrl": "https://openrouter.ai/api/v1",
+    "apiKey": "PASTE_API_KEY",
+    "workerProjectId": null
+  },
+  "editorial": {
+    "channelProfile": "Канал про искусственный интеллект: новые модели и их сравнение, инструменты и сервисы на ИИ, открытые проекты на GitHub, агенты для программирования, практические гайды, кейсы и промпты. Не подходят: политика, криптовалюты без связи с ИИ, реклама, розыгрыши, вакансии, анонсы чужих каналов.",
+    "styleGuide": "Пиши по-русски, спокойно и по делу, как редактор новостного канала про ИИ.\nПервый абзац — суть новости одним-двумя предложениями: кто, что сделал, чем это важно.\nДальше 1–3 коротких абзаца с фактами и цифрами из источника. Перечень из нескольких пунктов оформляй списком через «•» или «-».\nСсылки на первоисточник, репозиторий или сервис ставь прямо в текст: на слово через <a href> или отдельной строкой.\nБез эмодзи, без хэштегов, без восклицаний и рекламных оборотов. Не упоминай канал-источник.\nДлина 300–900 знаков.",
+    "footer": "@your_channel",
+    "proposeAll": true,
+    "skipAds": true,
+    "minScore": 60,
+    "minTextLength": 15,
+    "maxAgeHours": 36,
+    "memoryDays": 21,
+    "maxProposalsPerDay": 20,
+    "proposalTtlHours": 48
+  },
+  "schedule": {
+    "pollMinutes": 3,
+    "collectEnabled": true,
+    "pipelineEnabled": true
+  },
+  "network": {
+    "proxy": ""
+  }
+}

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bb-plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: bb-plugin/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npm run check
+      - name: Tests
+        run: npm test
+      - name: Standalone build is up to date
+        run: |
+          npm run build:standalone -- ../standalone
+          if [ -n "$(git status --porcelain -- ../standalone)" ]; then
+            git status --porcelain -- ../standalone
+            echo "standalone/ is out of date: run npm run build:standalone -- ../standalone and commit it." && exit 1
+          fi
+      - name: No secrets in the repository
+        working-directory: .
+        run: |
+          if git grep -lE '[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|sk-or-v1-[A-Za-z0-9]{20,}|sk-(proj|svcacct|admin|ant)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}|AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}' -- . ':!*.png'; then
+            echo "The files above contain something that looks like a secret." && exit 1
+          fi
+          if git ls-files | grep -vE '(^|/)newsdesk\.config\.example\.json$' | grep -E '\.session(-journal)?$|(^|/)newsdesk\.config|\.(db|sqlite)(-shm|-wal)?$|(^|/)\.env(\.|$)|\.(pem|key)$'; then
+            echo "A session, config, database or .env file is committed." && exit 1
+          fi

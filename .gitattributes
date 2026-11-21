@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+standalone/newsdesk.mjs linguist-generated=true -diff
+bb-plugin/package-lock.json linguist-generated=true
+bb-plugin/components/ui/** linguist-vendored=true

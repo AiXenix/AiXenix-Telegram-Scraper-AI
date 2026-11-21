@@ -1,0 +1,36 @@
+name: Bug report
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste tokens, API keys, `newsdesk.config.json` or Telegram session files.** Replace them with `***`.
+        **Не вставляйте токены, ключи API, `newsdesk.config.json` и файлы сессий.** Замените их на `***`.
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: How do you run it?
+      options:
+        - bb plugin
+        - Standalone script on Windows
+        - Standalone script on Linux or macOS
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "bb plugin: `bb plugin list`; script: the first line of newsdesk.mjs"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `status`
+      description: "`bb newsdesk status` or `newsdesk status`, with secrets removed"
+      render: text
