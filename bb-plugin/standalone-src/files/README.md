@@ -1,11 +1,11 @@
-# AiXenix Telegram Scrapper AI — standalone
+# AiXenix Telegram Scraper AI — standalone
 
 **English** · [Русский](#русский)
 
 The news desk as one Node.js file. It watches public Telegram channels, drops
 repeats of news you already have, drafts posts in your channel's voice and
 publishes them after you press **Publish** in your bot. Full documentation:
-<https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI>.
+<https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI>.
 
 ## What is here
 
@@ -66,7 +66,7 @@ Only one copy of the service may run with a given bot token.
 ИИ-редакция одним файлом для Node.js. Следит за открытыми Telegram-каналами,
 не предлагает повторно то, что у вас уже было, пишет посты в стиле вашего канала
 и публикует их после того, как вы нажмёте **«Разместить»** в боте. Полная
-документация: <https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/blob/main/README.ru.md>.
+документация: <https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/blob/main/README.ru.md>.
 
 ### Что здесь лежит
 

@@ -1,12 +1,12 @@
 <div align="center">
 
-# AiXenix Telegram Scrapper AI
+# AiXenix Telegram Scraper AI
 
 **ИИ-редакция для вашего Telegram-канала.**
 Следит за открытыми каналами, не предлагает повторно то, что у вас уже было, пишет посты в стиле вашего канала
 и публикует их только после того, как вы нажмёте **«Разместить»** в Telegram-боте.
 
-[![CI](https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/actions/workflows/ci.yml)
+[![CI](https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%E2%89%A5%2022.13-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![bb plugin](https://img.shields.io/badge/bb-plugin-111111)](bb-plugin/)
@@ -145,7 +145,7 @@ flowchart LR
 Выберите один. **С одним токеном бота может работать только одна копия**: Telegram отдаёт каждое нажатие кнопки только одной программе.
 
 ```
-AiXenix-Telegram-Scrapper-AI/
+AiXenix-Telegram-Scraper-AI/
 ├── bb-plugin/          # плагин bb и весь исходный код
 │   ├── src/            # ядро, общее для обоих способов запуска
 │   ├── server.ts       # оболочка bb: настройки, модели, API админки, `bb newsdesk`
@@ -173,14 +173,14 @@ AiXenix-Telegram-Scrapper-AI/
 **Установка**
 
 ```bash
-bb plugin install git:https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI --subdirectory bb-plugin
+bb plugin install git:https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI --subdirectory bb-plugin
 ```
 
 или из клона:
 
 ```bash
-git clone https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI.git
-cd AiXenix-Telegram-Scrapper-AI/bb-plugin && npm install
+git clone https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI.git
+cd AiXenix-Telegram-Scraper-AI/bb-plugin && npm install
 bb plugin install .
 ```
 
@@ -214,7 +214,7 @@ bb newsdesk llm-test --which writer     # проверить, что модел�
 
 **Windows**
 
-1. Скачайте `AiXenix-Telegram-Scrapper-AI-standalone-<версия>.zip` из [последнего релиза](https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/releases/latest) и распакуйте куда угодно, например в `C:\newsdesk\`. (Или *Code → Download ZIP* на этой странице и возьмите из архива папку `standalone`.)
+1. Скачайте `AiXenix-Telegram-Scraper-AI-standalone-<версия>.zip` из [последнего релиза](https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/releases/latest) и распакуйте куда угодно, например в `C:\newsdesk\`. (Или *Code → Download ZIP* на этой странице и возьмите из архива папку `standalone`.)
 2. Скопируйте `newsdesk.config.example.json` в **`newsdesk.config.json` в той же папке**. Это единственный файл со всеми настройками.
 3. Откройте его в Блокноте и заполните:
    - `telegram.botToken`: токен от @BotFather;

@@ -1,4 +1,4 @@
-# bb-plugin — AiXenix Telegram Scrapper AI
+# bb-plugin — AiXenix Telegram Scraper AI
 
 **English** · [Русский](#русский)
 

@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [1.0.0] - 2026-11-21
 
-First public release.
+First public release. The repository was briefly published as `AiXenix-Telegram-Scrapper-AI`; old links redirect here.
 
 ### Added
 
@@ -23,5 +23,5 @@ First public release.
 - Clean start (reset) from the admin page, `bb newsdesk reset --yes` and `newsdesk reset --yes`.
 - Tests: unit tests, an end-to-end scenario with a strict fake Telegram, and a live scenario script.
 
-[Unreleased]: https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/releases/tag/v1.0.0
+[Unreleased]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/releases/tag/v1.0.0

@@ -1,5 +1,5 @@
 #!/bin/sh
-# AiXenix Telegram Scrapper AI: runs the service and restarts it if it stops. Ctrl+C to stop.
+# AiXenix Telegram Scraper AI: runs the service and restarts it if it stops. Ctrl+C to stop.
 cd "$(dirname "$0")" || exit 1
 # Ctrl+C or a stop request ends the loop instead of restarting the service.
 trap 'exit 0' INT TERM

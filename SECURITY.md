@@ -5,7 +5,7 @@
 ## Reporting a vulnerability
 
 Please do not open a public issue for a vulnerability. Use
-[GitHub private vulnerability reporting](https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/security/advisories/new)
+[GitHub private vulnerability reporting](https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/security/advisories/new)
 instead (the *Report a vulnerability* button on the *Security* tab). If that
 does not work for you, use the contacts at [aixenix.com](https://aixenix.com). You will get an answer within a few days.
 
@@ -26,7 +26,7 @@ Only the latest release is supported.
 ## Русский
 
 **Об уязвимости** сообщайте не в открытом issue, а через
-[закрытое сообщение об уязвимости на GitHub](https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/security/advisories/new).
+[закрытое сообщение об уязвимости на GitHub](https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/security/advisories/new).
 Если так не получается, воспользуйтесь контактами на
 [aixenix.com](https://aixenix.com). Ответ — в течение нескольких дней.
 

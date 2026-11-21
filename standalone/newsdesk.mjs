@@ -1,4 +1,4 @@
-// AiXenix Telegram Scrapper AI 1.0.0, standalone build. Generated from bb-plugin/; do not edit by hand.
+// AiXenix Telegram Scraper AI 1.0.0, standalone build. Generated from bb-plugin/; do not edit by hand.
 import { createRequire as __createRequire } from "node:module";
 const require = __createRequire(import.meta.url);
 var __create = Object.create;

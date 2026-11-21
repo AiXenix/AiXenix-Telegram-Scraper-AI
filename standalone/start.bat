@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
-rem AiXenix Telegram Scrapper AI: runs the service and restarts it if it stops. Close the window to stop.
+rem AiXenix Telegram Scraper AI: runs the service and restarts it if it stops. Close the window to stop.
 cd /d "%~dp0"
-title AiXenix Telegram Scrapper AI
+title AiXenix Telegram Scraper AI
 set "NODE=node"
 where node >nul 2>&1
 if errorlevel 1 (

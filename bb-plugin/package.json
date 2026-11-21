@@ -56,7 +56,7 @@
   },
   "author": "AiXenix (https://aixenix.com)",
   "license": "MIT",
-  "homepage": "https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI#readme",
+  "homepage": "https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI#readme",
   "private": true,
   "scripts": {
     "check": "tsc --noEmit",
@@ -66,11 +66,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI.git",
+    "url": "git+https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI.git",
     "directory": "bb-plugin"
   },
   "bugs": {
-    "url": "https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/issues"
+    "url": "https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/issues"
   },
   "keywords": [
     "bb",

@@ -13,4 +13,4 @@ voice and publishes them only after you press Publish in your Telegram bot.
 - Models run on the subscriptions connected to bb, or on any OpenAI-compatible API.
 
 The same service also runs as a standalone script with the same config file.
-Source and documentation: https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI
+Source and documentation: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI

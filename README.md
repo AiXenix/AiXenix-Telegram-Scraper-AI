@@ -1,12 +1,12 @@
 <div align="center">
 
-# AiXenix Telegram Scrapper AI
+# AiXenix Telegram Scraper AI
 
 **An AI news desk for your Telegram channel.**
 It watches public channels, drops repeats of news you already have, drafts posts in your channel's voice
 and publishes them only after you press **Publish** in a Telegram bot.
 
-[![CI](https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/actions/workflows/ci.yml)
+[![CI](https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%E2%89%A5%2022.13-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![bb plugin](https://img.shields.io/badge/bb-plugin-111111)](bb-plugin/)
@@ -145,7 +145,7 @@ The admin page of the bb plugin, filled with invented demo data. The interface i
 Pick one. **Only one copy may run with a given bot token**: Telegram delivers each button press to one program only.
 
 ```
-AiXenix-Telegram-Scrapper-AI/
+AiXenix-Telegram-Scraper-AI/
 ├── bb-plugin/          # the bb plugin and all the source code
 │   ├── src/            # the engine shared by both ways of running
 │   ├── server.ts       # bb shell: settings, model runner, admin page API, `bb newsdesk`
@@ -173,14 +173,14 @@ Requires bb 0.49 or newer.
 **Install**
 
 ```bash
-bb plugin install git:https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI --subdirectory bb-plugin
+bb plugin install git:https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI --subdirectory bb-plugin
 ```
 
 or, from a clone:
 
 ```bash
-git clone https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI.git
-cd AiXenix-Telegram-Scrapper-AI/bb-plugin && npm install
+git clone https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI.git
+cd AiXenix-Telegram-Scraper-AI/bb-plugin && npm install
 bb plugin install .
 ```
 
@@ -214,7 +214,7 @@ Everything is in [`standalone/`](standalone/): one file `newsdesk.mjs` (all depe
 
 **Windows**
 
-1. Download `AiXenix-Telegram-Scrapper-AI-standalone-<version>.zip` from the [latest release](https://github.com/AiXenix/AiXenix-Telegram-Scrapper-AI/releases/latest) and unpack it anywhere, for example to `C:\newsdesk\`. (Or *Code → Download ZIP* on this page and take the `standalone` folder from it.)
+1. Download `AiXenix-Telegram-Scraper-AI-standalone-<version>.zip` from the [latest release](https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/releases/latest) and unpack it anywhere, for example to `C:\newsdesk\`. (Or *Code → Download ZIP* on this page and take the `standalone` folder from it.)
 2. Copy `newsdesk.config.example.json` to **`newsdesk.config.json` in the same folder**. This one file holds all settings.
 3. Open it in Notepad and fill in:
    - `telegram.botToken`: the token from @BotFather;

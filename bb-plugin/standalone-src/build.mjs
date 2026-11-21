@@ -26,7 +26,7 @@ await build({
   legalComments: "none",
   // Some bundled CommonJS dependencies call require() for Node built-ins.
   banner: {
-    js: `// AiXenix Telegram Scrapper AI ${version}, standalone build. Generated from bb-plugin/; do not edit by hand.\nimport { createRequire as __createRequire } from "node:module";\nconst require = __createRequire(import.meta.url);`,
+    js: `// AiXenix Telegram Scraper AI ${version}, standalone build. Generated from bb-plugin/; do not edit by hand.\nimport { createRequire as __createRequire } from "node:module";\nconst require = __createRequire(import.meta.url);`,
   },
   logLevel: "warning",
 });
