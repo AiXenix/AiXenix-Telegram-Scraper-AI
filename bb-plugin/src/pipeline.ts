@@ -36,11 +36,21 @@ export const MESSAGE_LIMIT = 4096;
 export const TRIAGE_BATCH = 10;
 
 export interface StoredMedia {
-  kind: "photo" | "video" | "other";
+  /** animation (GIF) and document come only through Telegram itself (forwarded or taken by the account). */
+  kind: "photo" | "video" | "animation" | "document" | "other";
   url: string | null;
   thumb?: string | null;
-  /** Telegram file id, present for posts the owner forwarded to the bot. */
+  /** Telegram file id: from a post the owner forwarded, or taken through the account. No size limit. */
   fileId?: string;
+}
+
+const SENDABLE_KINDS = new Set<StoredMedia["kind"]>(["photo", "video", "animation", "document"]);
+
+/** An item the bot can send: a file id of any kind, or a downloadable photo or video. */
+export function isSendable(item: StoredMedia): boolean {
+  if (!SENDABLE_KINDS.has(item.kind)) return false;
+  if (item.fileId !== undefined) return true;
+  return (item.kind === "photo" || item.kind === "video") && item.url !== null;
 }
 
 export function parseMedia(json: string): StoredMedia[] {
@@ -52,12 +62,14 @@ export function parseMedia(json: string): StoredMedia[] {
   }
 }
 
-/** Media that can actually be sent: photos and videos with a file to send, at most one album. */
+/** Media that can actually be sent, at most one album. Items that cannot be sent are left out, the rest still go. */
 export function usableMedia(post: PostRow): StoredMedia[] {
-  const items = parseMedia(post.media_json).filter((item) => item.kind === "photo" || item.kind === "video");
-  if (items.length === 0) return [];
-  if (items.some((item) => item.fileId === undefined && item.url === null)) return [];
-  return items.slice(0, 10);
+  return parseMedia(post.media_json).filter(isSendable).slice(0, 10);
+}
+
+/** How many of the post's media items cannot be sent (too big for the web preview, or a kind it does not give). */
+export function missingMedia(post: PostRow): number {
+  return parseMedia(post.media_json).filter((item) => !isSendable(item)).length;
 }
 
 /** The earliest source post whose media can be reused. */
@@ -76,7 +88,7 @@ export function prefilter(post: PostRow, config: Config, nowMs: number): string 
   if (nowMs - new Date(post.posted_at).getTime() > config.editorial.maxAgeHours * 3_600_000) return "устарел";
   const text = post.text.trim();
   if (text === "") return "нет текста";
-  const hasMedia = parseMedia(post.media_json).some((item) => item.kind === "photo" || item.kind === "video");
+  const hasMedia = parseMedia(post.media_json).some((item) => item.kind !== "other");
   // A short caption under a picture or a video is still a post; a few bare words are not.
   if (text.length < config.editorial.minTextLength && !hasMedia) return "слишком мало текста";
   if (config.editorial.skipAds && AD_MARKERS.test(text)) return "реклама";
@@ -618,7 +630,9 @@ export async function writeDraft(
     notes.push(`Текст длиннее подписи к медиа (${length} из ${CAPTION_LIMIT} знаков), поэтому пост без медиа.`);
   }
   if (mediaPost === null && sources.some((post) => parseMedia(post.media_json).length > 0)) {
-    notes.push("В источнике есть медиа, но через веб-версию Telegram файл недоступен.");
+    notes.push("В источнике есть медиа, но взять файл не удалось (веб-версия Telegram не отдаёт большие видео и файлы; подключите аккаунт Telegram в настройках).");
+  } else if (mediaPost !== null && missingMedia(mediaPost) > 0) {
+    notes.push(`Приложено медиа: ${usableMedia(mediaPost).length} из ${usableMedia(mediaPost).length + missingMedia(mediaPost)}; остальное веб-версия Telegram не отдаёт.`);
   }
   return { html, mediaPostId, note: notes.length === 0 ? null : notes.join(" ") };
 }

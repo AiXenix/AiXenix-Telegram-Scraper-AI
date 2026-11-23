@@ -29,6 +29,7 @@ and publishes them only after you press **Publish** in a Telegram bot.
 - [Screenshots](#screenshots)
 - [Two ways to run it](#two-ways-to-run-it)
 - [Telegram setup (both ways)](#telegram-setup-both-ways)
+- [Photos and videos: connect a Telegram account (optional)](#photos-and-videos-connect-a-telegram-account-optional)
 - [Run as a bb plugin](#run-as-a-bb-plugin)
 - [Run as a standalone script (Windows, Linux, macOS)](#run-as-a-standalone-script-windows-linux-macos)
 - [Configuration reference](#configuration-reference)
@@ -46,6 +47,7 @@ and publishes them only after you press **Publish** in a Telegram bot.
 | **Watches channels for you** | Reads the public channels on your list every few minutes and keeps a cursor per channel, so nothing is missed across restarts. A new channel starts from the moment you add it. |
 | **One news hook, one proposal** | If you published "Example Corp released model X", posts from other channels about the same release (what it can do, prices, opinions) are not proposed again. A genuinely new event about the same product is. |
 | **Does not judge your taste** | By default every new news hook is proposed: the models only look for repeats. Besides repeats, only stale, empty or very short posts, posts marked as advertising and reposts of your own channel are skipped. A stricter mode that also filters by topic and score is one switch away. |
+| **All photos and videos** | Optional: with a Telegram account connected, every photo and video of an album, large videos, GIFs and files come from Telegram itself, as in a Telethon script. Without it, media comes from the channel's web preview. |
 | **Writes in your voice** | Drafts follow your style guide and the latest posts of your channel, keep the source's links and facts, and add your signature. |
 | **The original at once** | The moment a news hook passes the filter, the bot sends you the original post (source, text, link with its picture) with a **❌ Reject** button, before any model writes a word. There is no daily limit: everything new arrives as it appears. |
 | **You decide** | The draft follows as a reply to the original, exactly as it will be published, with **✅ Publish**, **❌ Reject**, **🔁 Another variant** and **✏️ Edit** buttons. |
@@ -71,7 +73,7 @@ flowchart LR
     CH --> M
 ```
 
-1. **Collect.** Each source is read through its public web preview (`t.me/s/<channel>`). No Telegram account or session is used.
+1. **Collect.** Each source is read through its public web preview (`t.me/s/<channel>`); reading needs no Telegram account. An optional account brings the full media (see [Photos and videos](#photos-and-videos-connect-a-telegram-account-optional)).
 2. **Cheap checks.** Posts older than `maxAgeHours`, posts with no text, very short posts without media and posts marked as advertising are skipped without a model call. A post whose text is identical to one already seen is recorded as its repeat.
 3. **Repeat check.** Up to 10 posts at a time go to the filter model together with the titles of recent stories (published, proposed, rejected and the posts of your own channel) and the closest look-alikes by shared words and links. The model answers "repeat of story N" or "new". Repeats go to the filtered list with a line saying what they repeat.
 4. **The original, at once.** As soon as a post is found to be a new news hook, the bot sends you the original: the source, the title, the post's text and a link to it with its picture, plus a **❌ Reject** button. Turn it down here and no draft is written.
@@ -168,6 +170,20 @@ AiXenix-Telegram-Scraper-AI/
 5. **Add source channels**: `/add @channel` in the bot, the Sources page, or the `sources` list in the config.
 
 Sources must be **public channels with the web preview turned on**: the service reads `https://t.me/s/<channel>`. Private channels cannot be read this way.
+
+## Photos and videos: connect a Telegram account (optional)
+
+The web preview of a channel does not give large videos ("Media is too big"), GIFs or files, and a bot cannot read channels it is not a member of. To get every photo and video of an album, large videos, GIFs and files, connect a Telegram user account, as Telethon scripts do:
+
+- Before writing a post, the account forwards the source post (with the rest of its album) to your bot. The bot keeps Telegram's file ids, which have no size limit, and the forwarded copy is deleted at once. The draft and the publication go out with those files.
+- Reading channels still goes through the web preview; the account is used only for media.
+- Without an account, or for a channel that forbids forwarding, media comes from the web preview and the proposal says what is missing.
+
+**In bb:** Settings → *Аккаунт Telegram*. Enter `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org) → *API development tools*, then the phone number, the code Telegram sends you and, if the account has one, the cloud password. `bb newsdesk account status` shows the state; `bb newsdesk account logout` forgets the login.
+
+**In the script:** `newsdesk account login` asks for the same in the console (the password is not echoed) and writes the login to `newsdesk.config.json`. Also `newsdesk account status`, `newsdesk account logout` and `newsdesk account import-telethon <file.session>` to reuse a Telethon session that is still valid. The account connects directly or through a SOCKS5 proxy (`network.proxy` = `socks5://...`); an HTTP proxy is not used for it.
+
+Any account works, it does not need to be subscribed to the sources. If it is the account you use to talk to the bot, a forwarded post flashes in that chat for a second. The login shows up in Telegram → Settings → Devices as *Newsdesk*; end it there to revoke it.
 
 ## Run as a bb plugin
 
@@ -317,7 +333,19 @@ The default model names are those of bb's Codex provider. With another backend, 
 | `schedule.pollMinutes` | `3` | How often the channels are checked. |
 | `schedule.collectEnabled` | `true` | Collect new posts. |
 | `schedule.pipelineEnabled` | `true` | Check repeats and write drafts. |
-| `network.proxy` | `""` | Standalone only: `""`, `"env"`, or `"http://user:pass@host:port"`. |
+| `network.proxy` | `""` | Standalone only: `""`, `"env"`, or `"http://user:pass@host:port"`. The Telegram account uses only `socks5://...`. |
+
+</details>
+
+<details open>
+<summary><b>account</b>: the optional Telegram account</summary>
+
+| Field | Default | Meaning |
+|---|---|---|
+| `account.apiId` | `null` | `api_id` from my.telegram.org. |
+| `account.apiHash` | `""` | `api_hash` from my.telegram.org. Secret. |
+| `account.session` | `""` | The login, written by *Войти* or `account login`. Secret: it opens the whole account. |
+| `account.media` | `true` | Take media through the account. `false` keeps the login but uses the web preview. |
 
 </details>
 
@@ -345,7 +373,7 @@ The default model names are those of bb's Codex provider. With another backend, 
 - **No secrets in this repository.** It contains no tokens, keys, Telegram sessions, chat ids or personal channel lists. Tests use invented data and a fake Telegram server. The example config holds placeholders only.
 - **Never commit `newsdesk.config.json` or the `data/` folder.** The [`.gitignore`](.gitignore) already excludes them, together with `*.session`, `*.db` and `.env`.
 - **Where secrets live.** In bb: the bot token, API key and bb token are bb secret plugin settings; exports mask them as `***` unless you pass `--with-secrets`. In the script: in `newsdesk.config.json` as plain text. Keep that folder private; on Linux/macOS run `chmod 600 newsdesk.config.json` (the service itself rewrites the file with owner-only permissions).
-- **No Telegram account is used.** Channels are read through their public web preview; there is no user session to leak.
+- **The Telegram account is optional and only for media.** Its login (`account.session`) opens the whole account: in bb it is a secret setting, in the script it sits in `newsdesk.config.json`. Never share it; end the *Newsdesk* session in Telegram → Settings → Devices if it may have leaked. The code and the cloud password are used once to sign in and are not stored.
 - **Only you can press the buttons.** The bot answers only the paired owner. Every button carries a tag of the service copy that sent it, so a second copy cannot act on the first one's stories.
 - **Model input is treated as data.** Posts are wrapped as material in the prompts, the model is told not to follow instructions inside them, and model output is reduced to the HTML subset Telegram accepts before it is sent.
 - **The plugin's HTTP routes require the plugin token** (`x-bb-plugin-token`).
@@ -355,7 +383,7 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 ## Limitations
 
 - Only public channels with the web preview turned on can be read.
-- Videos that Telegram does not serve in the web preview are not attached; the proposal then says so and goes out as text.
+- Without a Telegram account, videos and files that the web preview does not serve are not attached; the proposal says so. With an account, everything is attached except posts of channels that forbid forwarding.
 - The service relies on the markup of `t.me/s/`. If Telegram changes it, the parser needs an update (it is covered by tests with a saved page).
 - The admin page, the bot and the console output of the script are in Russian. The built-in prompts are in Russian too, so story titles in the queue and history are Russian. The channel profile and the style guide can be in any language, and drafts follow the style guide.
 - Your own channel is read through its web preview as well. If it is private, publishing still works, but posts you publish by hand are not in the memory of repeats.

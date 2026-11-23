@@ -369,3 +369,22 @@ test("a config written for 1.0 with the proposal quota still loads", () => {
   assert.equal(config.editorial.footer, "@x");
   assert.equal("maxProposalsPerDay" in config.editorial, false);
 });
+
+test("what goes out in one message: an album of photos and videos, files together, a GIF alone", async () => {
+  const { sendableSet } = await import("../src/publisher.ts");
+  const photo = (id) => ({ kind: "photo", url: null, fileId: `p${id}` });
+  const video = (id) => ({ kind: "video", url: null, fileId: `v${id}` });
+  const gif = { kind: "animation", url: null, fileId: "g1" };
+  const doc = (id) => ({ kind: "document", url: null, fileId: `d${id}` });
+  assert.deepEqual(sendableSet([photo(1), video(2), gif, doc(3)]).map((item) => item.fileId), ["p1", "v2"]);
+  assert.deepEqual(sendableSet([doc(1), doc(2)]).map((item) => item.fileId), ["d1", "d2"]);
+  assert.deepEqual(sendableSet([gif]).map((item) => item.fileId), ["g1"]);
+  assert.deepEqual(sendableSet([{ kind: "animation", url: "https://x/y.mp4" }]), [], "a GIF without a file id cannot be sent");
+});
+
+test("a partly unavailable album still sends what it can", async () => {
+  const { usableMedia, missingMedia } = await import("../src/pipeline.ts");
+  const post = { media_json: JSON.stringify([{ kind: "photo", url: "https://cdn/a.jpg" }, { kind: "video", url: null }, { kind: "photo", url: "https://cdn/b.jpg" }]) };
+  assert.equal(usableMedia(post).length, 2);
+  assert.equal(missingMedia(post), 1);
+});

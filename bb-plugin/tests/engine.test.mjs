@@ -34,6 +34,7 @@ function channelPage(handle, posts) {
       (post) => `<div class="tgme_widget_message_wrap"><div class="tgme_widget_message" data-post="${handle}/${post.id}">
         ${post.photo ? `<a class="tgme_widget_message_photo_wrap" style="background-image:url('${post.photo}')"></a>` : ""}
         ${post.video ? `<a class="tgme_widget_message_video_player"><i class="tgme_widget_message_video_thumb" style="background-image:url('https://cdn.test/thumb.jpg')"></i><video src="${post.video}"></video></a>` : ""}
+        ${post.bigVideo ? `<a class="tgme_widget_message_video_player not_supported js-message_video_player"><i class="tgme_widget_message_video_thumb" style="background-image:url('https://cdn.test/thumb.jpg')"></i><div class="message_media_not_supported_label">Media is too big</div></a>` : ""}
         <div class="tgme_widget_message_text js-message_text">${post.html}</div>
         <span class="tgme_widget_message_views">1.2K</span>
         <a class="tgme_widget_message_date" href="https://t.me/${handle}/${post.id}"><time datetime="${iso(post.minutesAgo)}"></time></a>
@@ -80,6 +81,54 @@ function fakeFetch(input, init) {
 let holdDraft = null;
 /** Lets a test hold a media download (a URL with "hold" in it) until it says so. */
 let holdMedia = null;
+
+/**
+ * A stand-in for the Telegram account. Like the real one, it forwards the post
+ * (and the rest of its album) to the bot: the bot gets messages from the owner
+ * with a forward origin and file ids, as Telegram delivers them.
+ */
+const fakeAccount = {
+  plan: new Map(),
+  forwardedIds: [],
+  deleted: [],
+  failWith: null,
+  async me() {
+    return { id: String(OWNER), name: "Owner Account", username: "owner" };
+  },
+  async forwardPost(channel, msgId, botUsername, beforeForward) {
+    if (this.failWith !== null) throw this.failWith;
+    assert.equal(botUsername, "newsdesk_test_bot");
+    const items = this.plan.get(`${channel}:${msgId}`) ?? [{ id: msgId, kind: "photo" }];
+    const origin = (item) => item.repostOf ?? { channel, id: item.id, date: Math.floor(now / 1000) - 600 };
+    beforeForward(items.map((item) => ({ sourceId: item.id, originId: origin(item).id, originDate: origin(item).date })));
+    const forwardedIds = [];
+    for (const item of items) {
+      const id = 70_000 + this.forwardedIds.length;
+      this.forwardedIds.push(id);
+      forwardedIds.push(id);
+      const media =
+        item.kind === "photo"
+          ? { photo: [{ file_id: `acct-photo-small-${item.id}`, width: 90, height: 90 }, { file_id: `acct-photo-${item.id}`, width: 1280, height: 720 }] }
+          : item.kind === "video"
+            ? { video: { file_id: `acct-video-${item.id}` } }
+            : item.kind === "animation"
+              ? { animation: { file_id: `acct-gif-${item.id}` }, document: { file_id: `acct-gif-${item.id}` } }
+              : { document: { file_id: `acct-doc-${item.id}` } };
+      await ownerMessage({
+        message_id: id,
+        ...(items.length > 1 ? { media_group_id: `album-${msgId}` } : {}),
+        forward_origin: { type: "channel", chat: { id: -100900, type: "channel", username: origin(item).channel }, message_id: origin(item).id, date: origin(item).date },
+        caption: "Подпись оригинала",
+        ...media,
+      });
+    }
+    return { sourceIds: items.map((item) => item.id), forwardedIds };
+  },
+  async deleteForwarded(botUsername, ids) {
+    this.deleted.push(...ids);
+  },
+  async close() {},
+};
 
 /** A rule-based stand-in for the model. */
 const fakeLlm = {
@@ -175,7 +224,7 @@ before(async () => {
     },
   };
   const platform = { runtime: "standalone", fetch: fakeFetch, log() {}, changed() {} };
-  engine = new Engine({ store, platform, configStore, llm: fakeLlm });
+  engine = new Engine({ store, platform, configStore, llm: fakeLlm, accountFactory: (current) => (current.account.session === "" ? null : fakeAccount) });
   controller = new AbortController();
   void engine.runBot(controller.signal);
 });
@@ -647,4 +696,67 @@ test("an original too old to delete loses its button and the outcome line still 
   assert.equal(card.keyboard, null, "the original stays but cannot act any more");
   assert.equal(store.getStory(story.id).source_message_id, null);
   assert.ok(line.keyboard !== null, "the reason buttons are on the outcome line");
+});
+
+test("with a Telegram account, a large video and the whole album come from Telegram itself", async () => {
+  const manualBefore = store.db.prepare("SELECT COUNT(*) AS n FROM stories WHERE manual = 1").get().n;
+  // Without the account the web preview cannot give a large video at all.
+  channels.alpha.push({ id: 155, minutesAgo: 2, bigVideo: true, html: "Студия Ро показала трейлер мультфильма про роботов-садовников, премьера весной на стриминге." });
+  config = { ...config, account: { apiId: 12345, apiHash: "0".repeat(32), session: "fake-session", media: true } };
+  fakeAccount.plan.set("alpha:155", [{ id: 155, kind: "video" }]);
+  await engine.collectOnce(controller.signal);
+  await drain();
+  let story = store.db.prepare("SELECT * FROM stories ORDER BY id DESC").get();
+  assert.equal(story.status, "proposed", JSON.stringify({ reason: story.reason, note: story.draft_note }));
+  let control = await until(async () => controlOf(await mockState(), story.id), "video proposal delivered");
+  let state = await mockState();
+  const preview = toOwner(state).find((message) => message.message_id === control.reply_to);
+  assert.equal(preview.media.kind, "video");
+  assert.equal(preview.media.fileId, "acct-video-155", "the account's file id, whatever its size");
+  assert.ok(fakeAccount.deleted.includes(fakeAccount.forwardedIds[0]), "the forwarded copy is deleted again");
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM stories WHERE manual = 1").get().n, manualBefore, "the forward was not taken as hand-sent material");
+
+  // An album: every photo and video goes into the draft, not only what the web shows.
+  channels.alpha.push({ id: 156, minutesAgo: 1, photo: "https://cdn.test/a156.jpg", html: "Музей Каппа открыл зал с интерактивными макетами старинных паровозов и звуками депо." });
+  fakeAccount.plan.set("alpha:156", [{ id: 156, kind: "photo" }, { id: 157, kind: "photo" }, { id: 158, kind: "video" }]);
+  await engine.collectOnce(controller.signal);
+  await drain();
+  story = store.db.prepare("SELECT * FROM stories ORDER BY id DESC").get();
+  control = await until(async () => controlOf(await mockState(), story.id), "album proposal delivered");
+  state = await mockState();
+  const first = toOwner(state).find((message) => message.message_id === control.reply_to);
+  const album = toOwner(state).filter((message) => message.group !== undefined && message.group === first.group);
+  assert.deepEqual(album.map((message) => message.media.fileId), ["acct-photo-156", "acct-photo-157", "acct-video-158"]);
+
+  // A repost: the bot sees where the post was first published, and still recognises it as this post's media.
+  channels.alpha.push({ id: 160, minutesAgo: 1, photo: "https://cdn.test/a160.jpg", html: "Обсерватория Зета сняла полярное сияние над озером в необычном фиолетовом цвете." });
+  fakeAccount.plan.set("alpha:160", [{ id: 160, kind: "video", repostOf: { channel: "someone_else", id: 4242, date: Math.floor(now / 1000) - 7200 } }]);
+  await engine.collectOnce(controller.signal);
+  await drain();
+  story = store.db.prepare("SELECT * FROM stories ORDER BY id DESC").get();
+  control = await until(async () => controlOf(await mockState(), story.id), "repost proposal delivered");
+  state = await mockState();
+  assert.equal(toOwner(state).find((message) => message.message_id === control.reply_to).media.fileId, "acct-video-160");
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM stories WHERE manual = 1").get().n, manualBefore, "the repost's forward was not taken as hand-sent material");
+
+  // A forward that arrives after the wait ended is not taken as hand-sent material either.
+  await ownerMessage({ forward_origin: { type: "channel", chat: { id: -100900, type: "channel", username: "alpha" }, message_id: 160, date: Math.floor(now / 1000) - 600 }, caption: "Опоздавшая пересылка оригинала с видео и подписью длиннее двадцати знаков", video: { file_id: "late" } });
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  await drain();
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM stories WHERE manual = 1").get().n, manualBefore, "a late forward is swallowed");
+
+  // A login Telegram no longer accepts: media falls back to the web preview, and the status says why.
+  const { AccountError } = await import("../src/account.ts");
+  fakeAccount.failWith = new AccountError("unauthorized", "вход в аккаунт Telegram больше не действует, войдите заново");
+  config = { ...config, account: { ...config.account, session: "fake-session-2" } };
+  channels.alpha.push({ id: 161, minutesAgo: 1, photo: "https://cdn.test/a161.jpg", html: "Ботанический сад Эпсилон показал цветение редкой орхидеи, которое бывает раз в пятнадцать лет." });
+  await engine.collectOnce(controller.signal);
+  await drain();
+  story = store.db.prepare("SELECT * FROM stories ORDER BY id DESC").get();
+  control = await until(async () => controlOf(await mockState(), story.id), "fallback proposal delivered");
+  state = await mockState();
+  assert.equal(toOwner(state).find((message) => message.message_id === control.reply_to).media.source, "upload", "the web preview's photo is used");
+  assert.ok((await engine.overview("")).problems.some((problem) => /Аккаунт Telegram: вход .* больше не действует/u.test(problem)));
+  fakeAccount.failWith = null;
+  config = { ...config, account: { apiId: null, apiHash: "", session: "", media: true } };
 });

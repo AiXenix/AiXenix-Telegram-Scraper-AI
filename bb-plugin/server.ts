@@ -18,6 +18,7 @@ import { MIGRATIONS, Store, type EventRow, type StoryStatus } from "./src/db.ts"
 import {
   Engine,
   EngineError,
+  type AccountStatus,
   type Overview,
   type SourceView,
   type StoryView,
@@ -27,7 +28,7 @@ import { NO_TOOLS_PREAMBLE } from "./src/llm/shared.ts";
 import { createThreadLlm, pruneWorkerThreads, stopStrayWorkerThreads } from "./src/llm/threads.ts";
 import { errorMessage, type ConfigStore, type LlmRequest, type LlmRunner, type Platform } from "./src/platform.ts";
 
-export type { Config, EventRow, Overview, SourceView, StoryView, StoryStatus };
+export type { AccountStatus, Config, EventRow, Overview, SourceView, StoryView, StoryStatus };
 
 const STATUSES = ["candidate", "proposed", "publishing", "published", "rejected", "filtered", "own", "failed"] as const;
 
@@ -85,15 +86,32 @@ export const rpcContract = defineRpcContract({
     input: z.object({ which: z.enum(["filter", "writer"]) }).strict(),
     output: out<{ ok: boolean; ms: number; model: string; text: string }>(),
   },
+  account_status: { input: z.null(), output: out<AccountStatus>() },
+  account_login_start: {
+    input: z
+      .object({
+        apiId: z.number().int().positive().nullable(),
+        apiHash: z.string().trim().max(64),
+        phone: z.string().trim().min(5).max(32),
+      })
+      .strict(),
+    output: out<AccountStatus>(),
+  },
+  account_login_code: { input: z.object({ code: z.string().trim().min(3).max(12) }).strict(), output: out<AccountStatus>() },
+  account_login_password: { input: z.object({ password: z.string().min(1).max(256) }).strict(), output: out<AccountStatus>() },
+  account_login_cancel: { input: z.null(), output: out<AccountStatus>() },
+  account_logout: { input: z.null(), output: out<AccountStatus>() },
 });
 
 /** Realtime channel the admin page listens on. */
 export const CHANGED_CHANNEL = "changed";
 
-const SECRET_SETTING: Record<string, "botToken" | "llmBbToken" | "llmApiKey"> = {
+const SECRET_SETTING: Record<string, "botToken" | "llmBbToken" | "llmApiKey" | "accountApiHash" | "accountSession"> = {
   "telegram.botToken": "botToken",
   "llm.bbToken": "llmBbToken",
   "llm.apiKey": "llmApiKey",
+  "account.apiHash": "accountApiHash",
+  "account.session": "accountSession",
 };
 
 interface LlmJob {
@@ -112,6 +130,8 @@ export default async function plugin(bb: BbPluginApi) {
     botToken: { type: "string", label: "Токен Telegram-бота (@BotFather)", secret: true },
     llmApiKey: { type: "string", label: "Ключ API модели (только для llm.backend = openai)", secret: true },
     llmBbToken: { type: "string", label: "Токен плагина на другом сервере bb (только для llm.backend = bb-remote)", secret: true },
+    accountApiHash: { type: "string", label: "api_hash аккаунта Telegram (my.telegram.org)", secret: true },
+    accountSession: { type: "string", label: "Вход в аккаунт Telegram (заполняется кнопкой «Войти» в админке)", secret: true },
   });
 
   // ---- config: non-secret part in kv, secrets in bb's secret settings ------
@@ -126,6 +146,8 @@ export default async function plugin(bb: BbPluginApi) {
       base.telegram.botToken = typeof secrets.botToken === "string" ? secrets.botToken : "";
       base.llm.bbToken = typeof secrets.llmBbToken === "string" ? secrets.llmBbToken : "";
       base.llm.apiKey = typeof secrets.llmApiKey === "string" ? secrets.llmApiKey : "";
+      base.account.apiHash = typeof secrets.accountApiHash === "string" ? secrets.accountApiHash : "";
+      base.account.session = typeof secrets.accountSession === "string" ? secrets.accountSession : "";
       cached = base;
       return base;
     },
@@ -320,6 +342,12 @@ export default async function plugin(bb: BbPluginApi) {
       return { story: engine.storyView(story) };
     },
     story_set_draft: async ({ id, html }) => ({ story: engine.storyView(await engine.setDraft(id, html).catch(refuse)) }),
+    account_status: () => engine.accountStatus(),
+    account_login_start: (input) => engine.accountLoginStart(input).catch(refuse),
+    account_login_code: ({ code }) => engine.accountLoginCode(code).catch(refuse),
+    account_login_password: ({ password }) => engine.accountLoginPassword(password).catch(refuse),
+    account_login_cancel: () => engine.accountLoginCancel(),
+    account_logout: () => engine.accountLogout().catch(refuse),
     config_get: async () => ({ config: redactConfig(await configStore.load()) }),
     config_set: async ({ config }) => {
       const current = await configStore.load();
@@ -568,12 +596,32 @@ export default async function plugin(bb: BbPluginApi) {
             }
             const current = await configStore.load();
             // The file replaces the config; values it omits fall back to defaults, masked secrets keep their value.
-            const next = applyConfigEdit({ ...DEFAULT_CONFIG, telegram: current.telegram, llm: current.llm }, parsed);
+            const next = applyConfigEdit({ ...DEFAULT_CONFIG, telegram: current.telegram, llm: current.llm, account: current.account }, parsed);
             await configStore.save(next).catch(fail);
             await engine.syncSources().catch(() => undefined);
             engine.kickCollector();
             platform.changed();
             return { exitCode: 0, stdout: `Настройки загружены. Источников: ${next.sources.length}` };
+          },
+        }),
+        "account status": cliCommand({
+          summary: "Аккаунт Telegram, через который берутся фото и видео постов",
+          async run() {
+            const status = await engine.accountStatus();
+            const lines = [
+              status.connected
+                ? `Подключён${status.user === null ? "" : `: ${status.user.name}${status.user.username === null ? "" : ` (@${status.user.username})`}`}. Медиа через аккаунт: ${status.media ? "да" : "нет"}.`
+                : "Не подключён: медиа берутся из веб-версии (большие видео и файлы туда не попадают). Войти: админка → Настройки → Аккаунт Telegram.",
+            ];
+            if (status.problem !== null) lines.push(`Проблема: ${status.problem}`);
+            return { exitCode: status.problem === null ? 0 : 1, stdout: lines.join("\n") };
+          },
+        }),
+        "account logout": cliCommand({
+          summary: "Забыть вход в аккаунт Telegram (медиа снова из веб-версии)",
+          async run() {
+            await engine.accountLogout();
+            return { exitCode: 0, stdout: "Вход забыт. Завершить сам сеанс можно в Telegram: Настройки → Устройства." };
           },
         }),
         "llm-test": cliCommand({

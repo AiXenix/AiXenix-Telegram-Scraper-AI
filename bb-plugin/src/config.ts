@@ -98,6 +98,24 @@ export const configSchema = z
         proxy: z.string().trim().max(300),
       })
       .strict(),
+    /**
+     * A Telegram user account, as the original Telethon script had: the source
+     * posts' photos, videos, albums, GIFs and files are taken from Telegram
+     * itself instead of the web preview, which cannot give large videos.
+     * Optional; without it media comes from the web preview.
+     */
+    account: z
+      .object({
+        /** api_id from my.telegram.org (API development tools). null when no account is used. */
+        apiId: z.number().int().positive().nullable(),
+        /** api_hash from my.telegram.org. Secret. */
+        apiHash: z.string().trim().max(64),
+        /** The login, written by "Войти" on the settings page or `newsdesk account login`. Secret: it opens the whole account. */
+        session: z.string().trim().max(4000),
+        /** Take media through the account. Off: the login stays, media comes from the web preview. */
+        media: z.boolean(),
+      })
+      .strict(),
   })
   .strict();
 
@@ -108,6 +126,8 @@ export const SECRET_PATHS = [
   ["telegram", "botToken"],
   ["llm", "bbToken"],
   ["llm", "apiKey"],
+  ["account", "apiHash"],
+  ["account", "session"],
 ] as const;
 
 export const DEFAULT_STYLE_GUIDE = [
@@ -158,6 +178,7 @@ export const DEFAULT_CONFIG: Config = {
     pipelineEnabled: true,
   },
   network: { proxy: "" },
+  account: { apiId: null, apiHash: "", session: "", media: true },
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -307,6 +328,15 @@ export function configWarnings(
     warnings.push("Для llm.backend bb-remote нужны llm.bbUrl и llm.bbToken.");
   }
   if (helpers.isPlaceholder(editorial.footer.trim())) warnings.push("editorial.footer — заглушка из примера: укажите свою подпись или \"\".");
+  const account = config.account;
+  if (account.apiId !== null && account.apiHash === "") warnings.push("account.apiId задан, а account.apiHash пуст: возьмите оба на my.telegram.org.");
+  if (account.apiId !== null && account.apiHash !== "" && account.session === "" && account.media) {
+    warnings.push("Аккаунт Telegram не подключён: войдите (Настройки → Аккаунт Telegram, или newsdesk account login), иначе медиа берутся из веб-версии.");
+  }
+  const proxy = config.network.proxy.trim();
+  if (runtime === "standalone" && account.session !== "" && proxy !== "" && proxy !== "env" && !/^socks5h?:\/\//iu.test(proxy)) {
+    warnings.push("Аккаунт Telegram ходит напрямую или через SOCKS5-прокси (socks5://...); HTTP-прокси из network.proxy он не использует.");
+  }
   return warnings;
 }
 

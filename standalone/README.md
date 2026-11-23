@@ -34,6 +34,8 @@ You need **Node.js 22.13 or newer**: <https://nodejs.org/>.
 3. Run `start.bat` (Windows) or `./start.sh` (Linux, macOS).
 4. The window shows `/start <code>`: send it to your bot. From then on the bot works only with you.
 
+**Photos and videos like in a Telethon script (optional).** The channel's web preview has no large videos, GIFs or files. `newsdesk account login` (api_id and api_hash from <https://my.telegram.org>, then your phone and the code) lets the service take them from Telegram itself. The login is written to `newsdesk.config.json`: keep that file private.
+
 Telegram blocked on your network? Set `network.proxy` to `"http://user:password@host:port"` or to `"env"`.
 
 `newsdesk.config.json` holds your tokens in plain text: never share or commit it. History and memory are in the `data` folder next to it.
@@ -51,6 +53,7 @@ newsdesk reject 12 reason  reject
 newsdesk restore 12        bring a dropped or failed story back
 newsdesk reset --yes       clean start: watch only what appears from now on
 newsdesk llm-test          check that the model answers
+newsdesk account login     optional: sign in to a Telegram account to get every photo, video, GIF and file of a post
 newsdesk config check      check the config file
 newsdesk help              every command
 ```
@@ -95,6 +98,8 @@ Only one copy of the service may run with a given bot token.
 3. Запустите `start.bat` (Windows) или `./start.sh` (Linux, macOS).
 4. В окне появится `/start <код>`: отправьте это своему боту. После этого бот работает только с вами.
 
+**Фото и видео как в скрипте на Telethon (по желанию).** В веб-версии канала нет больших видео, гифок и файлов. `newsdesk account login` (api_id и api_hash с <https://my.telegram.org>, затем телефон и код) позволит брать их из самого Telegram. Вход записывается в `newsdesk.config.json`: никому этот файл не передавайте.
+
 Telegram заблокирован в вашей сети? Укажите `network.proxy`: `"http://логин:пароль@адрес:порт"` или `"env"`.
 
 В `newsdesk.config.json` ваши токены лежат открытым текстом: никому его не передавайте и не выкладывайте. История и память — в папке `data` рядом с ним.
@@ -112,6 +117,7 @@ newsdesk reject 12 причина отклонить
 newsdesk restore 12        вернуть в работу отсеянный или неудавшийся сюжет
 newsdesk reset --yes       начать с чистого листа: следить только за новым с этого момента
 newsdesk llm-test          проверить, что модель отвечает
+newsdesk account login     по желанию: войти в аккаунт Telegram, чтобы брать все фото, видео, гифки и файлы поста
 newsdesk config check      проверить файл настроек
 newsdesk help              все команды
 ```

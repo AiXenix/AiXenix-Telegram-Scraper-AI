@@ -11,11 +11,13 @@ does not work for you, use the contacts at [aixenix.com](https://aixenix.com). Y
 
 ## Never post secrets
 
-Bot tokens, API keys, bb plugin tokens, `newsdesk.config.json`, the `data/`
-folder and Telegram session files must never appear in issues, pull requests or
+Bot tokens, API keys, bb plugin tokens, the Telegram account login
+(`account.session`, `api_hash`), `newsdesk.config.json`, the `data/` folder and
+Telegram session files must never appear in issues, pull requests or
 logs you attach. If you posted one by mistake, revoke it right away: a new bot
 token in [@BotFather](https://t.me/BotFather) (`/revoke`), a new key at your
-model provider, a new plugin token with `bb plugin token newsdesk --rotate`.
+model provider, a new plugin token with `bb plugin token newsdesk --rotate`; for the Telegram
+account, end the *Newsdesk* session in Telegram → Settings → Devices.
 
 ## Supported versions
 
@@ -31,9 +33,11 @@ Only the latest release is supported.
 [aixenix.com](https://aixenix.com). Ответ — в течение нескольких дней.
 
 **Никогда не публикуйте секреты**: токены ботов, ключи API, токены плагина bb,
-файл `newsdesk.config.json`, папку `data/` и файлы сессий Telegram. Если такое
+вход в аккаунт Telegram (`account.session`, `api_hash`), файл
+`newsdesk.config.json`, папку `data/` и файлы сессий Telegram. Если такое
 случайно попало в открытый доступ, сразу отзовите: новый токен бота в
 [@BotFather](https://t.me/BotFather) (`/revoke`), новый ключ у поставщика
-моделей, новый токен плагина командой `bb plugin token newsdesk --rotate`.
+моделей, новый токен плагина командой `bb plugin token newsdesk --rotate`; для аккаунта
+Telegram завершите сеанс «Newsdesk» в Telegram → Настройки → Устройства.
 
 Поддерживается только последняя версия.

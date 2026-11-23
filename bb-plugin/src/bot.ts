@@ -531,6 +531,8 @@ export class BotController {
   }
 
   private async handleMessage(api: TelegramApi, config: Config, message: TgMessage, signal: AbortSignal): Promise<void> {
+    // A post the Telegram account just forwarded for its media: taken by the engine, nothing to answer.
+    if (this.engine.captureForward(message)) return;
     const chatId = message.chat.id;
     const text = (message.text ?? "").trim();
     const reply = (html: string, keyboard?: InlineKeyboard) =>

@@ -40,5 +40,11 @@
   },
   "network": {
     "proxy": ""
+  },
+  "account": {
+    "apiId": null,
+    "apiHash": "",
+    "session": "",
+    "media": true
   }
 }

@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import type { Config, EventRow, Overview, SourceView, StoryStatus, StoryView, rpcContract } from "./server";
+import type { AccountStatus, Config, EventRow, Overview, SourceView, StoryStatus, StoryView, rpcContract } from "./server";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
@@ -511,6 +511,134 @@ function NumberField({ label, hint, value, min, max, onChange }: { label: string
   );
 }
 
+/**
+ * The Telegram account that takes the source posts' media from Telegram
+ * itself, as the original script did. Signing in goes code by code here; the
+ * code and the password go straight to the server and are not stored.
+ */
+function AccountSection({
+  rpc,
+  config,
+  edit,
+  reload,
+}: {
+  rpc: Rpc;
+  config: Config;
+  edit: (mutate: (draft: Config) => void) => void;
+  reload: () => void;
+}) {
+  const [status, setStatus] = useState<AccountStatus | null>(null);
+  const [apiId, setApiId] = useState(config.account.apiId === null ? "" : String(config.account.apiId));
+  const [apiHash, setApiHash] = useState("");
+  const [phone, setPhone] = useState("");
+  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const { busy, error, run } = useAction();
+  const refresh = useCallback(() => {
+    rpc.call("account_status").then(setStatus, () => undefined);
+  }, [rpc]);
+  useEffect(refresh, [refresh]);
+  const act = (key: string, action: () => Promise<AccountStatus>) =>
+    run(key, async () => {
+      const next = await action();
+      setStatus(next);
+      if (next.connected && next.loginStep === null) {
+        setCode("");
+        setPassword("");
+        reload();
+      }
+    });
+  if (status === null) return null;
+  const step = status.loginStep;
+  return (
+    <Section title="Аккаунт Telegram: фото и видео как в оригинале">
+      <p className="text-sm text-muted-foreground">
+        Как в исходном скрипте: посты с медиа берутся через ваш аккаунт Telegram — все фото и видео альбома, большие видео, гифки и файлы. Аккаунт на секунду
+        пересылает пост боту и сразу удаляет пересланное. Без аккаунта медиа берутся из веб-версии канала, а там нет больших видео и файлов.
+      </p>
+      {status.connected ? (
+        <div className="space-y-3">
+          <p className="text-sm">
+            Подключён{status.user === null ? "" : `: ${status.user.name}${status.user.username === null ? "" : ` (@${status.user.username})`}`}.
+          </p>
+          {status.problem === null ? null : <ErrorLine>{status.problem}</ErrorLine>}
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={config.account.media} onCheckedChange={(value) => edit((draft) => { draft.account.media = value; })} aria-label="Брать медиа через аккаунт" />
+            Брать медиа через аккаунт (после переключения нажмите «Сохранить настройки»)
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => act("logout", () => rpc.call("account_logout"))}>
+              Выйти из аккаунта
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Вход хранится в секретных настройках bb и открывает весь аккаунт. Сам сеанс называется «Newsdesk»; завершить его можно в Telegram → Настройки → Устройства.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {status.problem === null ? null : <ErrorLine>{status.problem}</ErrorLine>}
+          {step === null ? (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="api_id" hint="my.telegram.org → API development tools: создайте приложение, возьмите App api_id и App api_hash.">
+                  <Input inputMode="numeric" value={apiId} onChange={(event) => setApiId(event.target.value.replace(/\D/gu, ""))} />
+                </Field>
+                <Field label="api_hash" hint={status.hasApiHash ? "Сейчас задан; чтобы заменить, вставьте новый." : "32 символа из того же раздела."}>
+                  <Input type="password" autoComplete="off" value={apiHash} placeholder={status.hasApiHash ? "задан" : "не задан"} onChange={(event) => setApiHash(event.target.value)} />
+                </Field>
+              </div>
+              <Field label="Номер телефона аккаунта" hint="С кодом страны. Telegram пришлёт код в приложение.">
+                <Input inputMode="tel" autoComplete="off" placeholder="+79991234567" value={phone} onChange={(event) => setPhone(event.target.value)} />
+              </Field>
+              <Button
+                size="sm"
+                disabled={busy !== null || phone.trim() === "" || (apiId === "" && status.apiId === null)}
+                onClick={() =>
+                  act("start", () =>
+                    rpc.call("account_login_start", { apiId: apiId === "" ? null : Number(apiId), apiHash, phone }),
+                  )
+                }
+              >
+                {busy === "start" ? "Отправляю код…" : "Получить код"}
+              </Button>
+            </>
+          ) : step === "code" ? (
+            <>
+              <Field label="Код из Telegram" hint="Пришёл в приложение Telegram (чат «Telegram») или по SMS.">
+                <Input inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value)} />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" disabled={busy !== null || code.trim().length < 3} onClick={() => act("code", () => rpc.call("account_login_code", { code }))}>
+                  {busy === "code" ? "Вхожу…" : "Войти"}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act("cancel", () => rpc.call("account_login_cancel"))}>
+                  Отмена
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <Field label="Облачный пароль аккаунта" hint={status.loginHint === null ? "У аккаунта включена двухэтапная проверка." : `Подсказка: ${status.loginHint}`}>
+                <Input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" disabled={busy !== null || password === ""} onClick={() => act("password", () => rpc.call("account_login_password", { password }))}>
+                  {busy === "password" ? "Проверяю…" : "Войти"}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => act("cancel", () => rpc.call("account_login_cancel"))}>
+                  Отмена
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      <ErrorLine>{error}</ErrorLine>
+    </Section>
+  );
+}
+
 function SettingsTab({ rpc, overview, onChanged }: { rpc: Rpc; overview: Overview | null; onChanged: () => void }) {
   const [config, setConfig] = useState<Config | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -585,6 +713,16 @@ function SettingsTab({ rpc, overview, onChanged }: { rpc: Rpc; overview: Overvie
           )}
         </p>
       </Section>
+
+      <AccountSection
+        rpc={rpc}
+        config={config}
+        edit={edit}
+        reload={() => {
+          load();
+          onChanged();
+        }}
+      />
 
       <Section title="Модели">
         <Field label="Откуда брать модели" hint="По подпискам bb запросы идут скрытыми тредами Codex и расходуют лимиты подключённых аккаунтов.">

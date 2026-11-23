@@ -177,8 +177,10 @@ export function startMockTelegram({ port = 0, longPollMs = 800 } = {}) {
       return items.map((item, index) => {
         if (item.type !== "photo" && item.type !== "video") throw new Error("Bad Request: wrong type of the media");
         const media = mediaInput({ media: item.media }, files, "media", item.type);
-        if (index > 0 && item.caption !== undefined) throw new Error("Bad Request: test server expects the caption on the first item only");
-        return apiMessage(record(chatId, { media, group, reply_to: index === 0 ? (params.reply_parameters?.message_id ?? null) : null, ...(index === 0 ? caption(item, 1024) : {}) }));
+        // The service puts the text on the first photo or video, or on the last file of a file album.
+        const captionAt = item.type === "document" ? items.length - 1 : 0;
+        if (index !== captionAt && item.caption !== undefined) throw new Error("Bad Request: test server expects the caption on one item only");
+        return apiMessage(record(chatId, { media, group, reply_to: index === 0 ? (params.reply_parameters?.message_id ?? null) : null, ...(index === captionAt ? caption(item, 1024) : {}) }));
       });
     },
     editMessageText(params) {

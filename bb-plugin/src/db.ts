@@ -109,6 +109,7 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE stories ADD COLUMN duplicate_of INTEGER`,
   `ALTER TABLE stories ADD COLUMN source_chat_id INTEGER`,
   `ALTER TABLE stories ADD COLUMN source_message_id INTEGER`,
+  `ALTER TABLE posts ADD COLUMN media_checked_at TEXT`,
 ];
 
 /**
@@ -208,6 +209,8 @@ export interface PostRow {
   story_id: number | null;
   state: "new" | "done" | "skipped";
   skip_reason: string | null;
+  /** When the post's media was taken through the Telegram account (or that was tried); null if never. */
+  media_checked_at: string | null;
   created_at: string;
 }
 
@@ -311,7 +314,7 @@ export class Store {
   // ---- posts -------------------------------------------------------------
 
   /** Returns false when this post was already stored. */
-  insertPost(post: Omit<PostRow, "id" | "story_id" | "state" | "skip_reason" | "created_at">): boolean {
+  insertPost(post: Omit<PostRow, "id" | "story_id" | "state" | "skip_reason" | "created_at" | "media_checked_at">): boolean {
     const info = this.db
       .prepare(
         `INSERT OR IGNORE INTO posts
@@ -455,6 +458,14 @@ export class Store {
          ORDER BY id ASC LIMIT 20`,
       )
       .all() as StoryRow[];
+  }
+  /** Replaces a post's media with what the Telegram account delivered, or only marks that it was tried. */
+  setPostMedia(postId: number, mediaJson: string | null): void {
+    if (mediaJson === null) {
+      this.db.prepare(`UPDATE posts SET media_checked_at = ? WHERE id = ?`).run(nowIso(), postId);
+    } else {
+      this.db.prepare(`UPDATE posts SET media_json = ?, media_checked_at = ? WHERE id = ?`).run(mediaJson, nowIso(), postId);
+    }
   }
   /** Records a sent original only if the story still waits for it; false means the story moved on meanwhile. */
   claimSourceCard(id: number, chatId: number, messageId: number): boolean {

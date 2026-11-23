@@ -47,6 +47,25 @@ function fileIdOf(message: TgMessage): string | null {
   return message.video?.file_id ?? message.animation?.file_id ?? message.document?.file_id ?? null;
 }
 
+const SINGLE_METHOD = { photo: "sendPhoto", video: "sendVideo", animation: "sendAnimation", document: "sendDocument" } as const;
+
+/**
+ * What can go out in one message: one item of any kind, or an album. Telegram
+ * mixes photos and videos in an album, puts files only with files, and never
+ * puts a GIF in one; whatever does not fit is left out.
+ */
+export function sendableSet(media: StoredMedia[]): StoredMedia[] {
+  const items = media.filter(
+    (item) => item.kind === "photo" || item.kind === "video" || ((item.kind === "animation" || item.kind === "document") && item.fileId !== undefined),
+  );
+  if (items.length <= 1) return items;
+  const visual = items.filter((item) => item.kind === "photo" || item.kind === "video");
+  if (visual.length >= 1) return visual.slice(0, 10);
+  const documents = items.filter((item) => item.kind === "document");
+  if (documents.length >= 1) return documents.slice(0, 10);
+  return items.slice(0, 1);
+}
+
 /**
  * Sends the post. `media` items carry either a Telegram file id (sent as is)
  * or a URL (downloaded and uploaded). Throws MediaError when a file cannot be
@@ -61,7 +80,7 @@ export async function sendPost(
   signal?: AbortSignal,
   options: { replyTo?: number } = {},
 ): Promise<SentPost> {
-  const items = media.filter((item) => item.kind === "photo" || item.kind === "video").slice(0, 10);
+  const items = sendableSet(media);
   const reply =
     options.replyTo === undefined ? {} : { reply_parameters: { message_id: options.replyTo, allow_sending_without_reply: true } };
   if (items.length === 0) {
@@ -79,7 +98,7 @@ export async function sendPost(
       references.push(item.fileId);
       continue;
     }
-    if (item.url === null) throw new MediaError("у медиа нет ни файла, ни адреса");
+    if (item.url === null || (item.kind !== "photo" && item.kind !== "video")) throw new MediaError("у медиа нет ни файла, ни адреса");
     const isVideo = item.kind === "video";
     const data = await download(httpFetch, item.url, isVideo ? MAX_VIDEO_BYTES : MAX_PHOTO_BYTES, signal);
     const field = `file${index}`;
@@ -95,16 +114,16 @@ export async function sendPost(
   try {
     if (items.length === 1) {
       const item = items[0] as StoredMedia;
-      const isVideo = item.kind === "video";
+      const kind = item.kind as keyof typeof SINGLE_METHOD;
       const params = {
         chat_id: chatId,
-        [isVideo ? "video" : "photo"]: references[0],
+        [kind]: references[0],
         caption: html,
         parse_mode: "HTML",
-        ...(isVideo ? { supports_streaming: true } : {}),
+        ...(kind === "video" ? { supports_streaming: true } : {}),
         ...reply,
       };
-      const method = isVideo ? "sendVideo" : "sendPhoto";
+      const method = SINGLE_METHOD[kind];
       const message =
         files.length === 0
           ? await api.call<TgMessage>(method, params, { signal })
@@ -115,10 +134,13 @@ export async function sendPost(
         media: fileId === null ? [] : [{ kind: item.kind, url: null, fileId }],
       };
     }
+    // Telegram shows an album's caption under it only when it is on the first photo or video;
+    // in an album of files every caption sits under its own file, so the text goes on the last one.
+    const captionAt = items[0]?.kind === "document" ? items.length - 1 : 0;
     const group = items.map((item, index) => ({
-      type: item.kind === "video" ? "video" : "photo",
+      type: item.kind === "video" ? "video" : item.kind === "document" ? "document" : "photo",
       media: references[index],
-      ...(index === 0 ? { caption: html, parse_mode: "HTML" } : {}),
+      ...(index === captionAt ? { caption: html, parse_mode: "HTML" } : {}),
     }));
     const params = { chat_id: chatId, media: group, ...reply };
     const messages =

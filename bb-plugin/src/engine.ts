@@ -2,6 +2,7 @@
 // The bb plugin and the standalone script both create one Engine and start
 // the same four loops (collector, pipeline, bot, maintenance).
 import { randomInt } from "node:crypto";
+import { AccountError, AccountLogin, TelegramAccount, type AccountUser, type ForwardItem, type LoginStep, type TelegramAccountLike } from "./account.ts";
 import { BotController } from "./bot.ts";
 import { NOT_STARTED, collectSource, pageFetcher, probeSource, type CollectResult } from "./collector.ts";
 import { normalizeSources, serializeSources, type Config, type SourceEntry } from "./config.ts";
@@ -10,6 +11,7 @@ import { nowIso } from "./db.ts";
 import {
   MANUAL_REASON,
   MESSAGE_LIMIT,
+  isSendable,
   parseMedia,
   pickMediaPost,
   triageBatch,
@@ -20,7 +22,7 @@ import {
 } from "./pipeline.ts";
 import { errorMessage, sleep, type ConfigStore, type LlmRunner, type Platform } from "./platform.ts";
 import { MediaError, sendPost } from "./publisher.ts";
-import { TelegramApi, TelegramError, type TgUser } from "./telegram.ts";
+import { TelegramApi, TelegramError, type TgMessage, type TgUser } from "./telegram.ts";
 import {
   contentTokens,
   escapeHtml,
@@ -37,6 +39,53 @@ export interface EngineDeps {
   platform: Platform;
   configStore: ConfigStore;
   llm: LlmRunner;
+  /** Builds the Telegram account client from the config; tests pass a fake. Default: the real gramjs client. */
+  accountFactory?: (config: Config) => TelegramAccountLike | null;
+}
+
+/** The account's login, as the settings page shows it. */
+export interface AccountStatus {
+  /** api_id, api_hash and a login are all there. */
+  connected: boolean;
+  apiId: number | null;
+  hasApiHash: boolean;
+  media: boolean;
+  user: AccountUser | null;
+  problem: string | null;
+  /** A login in progress: the next thing to enter. */
+  loginStep: "code" | "password" | null;
+  loginHint: string | null;
+}
+
+/** Media an account forward brought back to the bot, waited for by the pipeline. */
+interface MediaCapture {
+  /** Origin key -> source message id, for every message forwarded. */
+  expected: Map<string, number>;
+  /** Source message id -> the message the bot got. */
+  got: Map<number, TgMessage>;
+  done: () => void;
+}
+
+/** How a forwarded message is recognised: its original date and message id, as the Bot API reports them. */
+function originKey(date: number, messageId: number | null | undefined): string {
+  return `${date}:${messageId ?? ""}`;
+}
+
+function defaultAccount(config: Config): TelegramAccountLike | null {
+  const account = config.account;
+  if (!account.media || account.apiId === null || account.apiHash === "" || account.session === "") return null;
+  return new TelegramAccount({ apiId: account.apiId, apiHash: account.apiHash }, account.session, config.network.proxy);
+}
+
+/** The media item a forwarded message carries, as the bot can send it again. */
+function mediaOfMessage(message: TgMessage): StoredMedia | null {
+  if (message.photo !== undefined && message.photo.length > 0) {
+    return { kind: "photo", url: null, fileId: (message.photo[message.photo.length - 1] as { file_id: string }).file_id };
+  }
+  if (message.video !== undefined) return { kind: "video", url: null, fileId: message.video.file_id };
+  if (message.animation !== undefined) return { kind: "animation", url: null, fileId: message.animation.file_id };
+  if (message.document !== undefined) return { kind: "document", url: null, fileId: message.document.file_id };
+  return null;
 }
 
 export interface SourceView {
@@ -188,12 +237,25 @@ export class Engine {
   private channelProblem: string | null = null;
   private channelCheckedAt = 0;
   private channelCheckedFor = "";
+  private readonly accountFactory: (config: Config) => TelegramAccountLike | null;
+  private account: TelegramAccountLike | null = null;
+  /** The account settings the current client was built from; a change rebuilds it. */
+  private accountKey = "";
+  private accountUser: AccountUser | null = null;
+  /** Why the account cannot be used, or null. "unauthorized" stops using it until the login changes. */
+  private accountProblem: string | null = null;
+  private accountBlocked = false;
+  private readonly captures = new Map<string, MediaCapture>();
+  /** Forwards whose wait has ended; if they still arrive, they are not hand-sent material. Key -> until when. */
+  private readonly lateForwards = new Map<string, number>();
+  private login: { flow: AccountLogin; apiId: number; apiHash: string; step: LoginStep } | null = null;
 
   constructor(deps: EngineDeps) {
     this.store = deps.store;
     this.platform = deps.platform;
     this.configStore = deps.configStore;
     this.llm = deps.llm;
+    this.accountFactory = deps.accountFactory ?? defaultAccount;
     this.bot = new BotController(this);
   }
 
@@ -641,6 +703,7 @@ export class Engine {
     if (story === undefined) return;
     if (story.status !== "candidate" && story.status !== "proposed") return;
     const config = await this.config();
+    if (story.status === "candidate") await this.takeStoryMedia(story, config, signal);
     try {
       const draft = await writeDraft(this.pipelineContext(config, signal), story, options);
       // The owner may have turned the story down while the model was writing.
@@ -1029,7 +1092,7 @@ export class Engine {
         text: truncate(post.text, 1500),
         media: parseMedia(post.media_json).map((item) => ({
           kind: item.kind,
-          sendable: item.fileId !== undefined || item.url !== null,
+          sendable: isSendable(item),
         })),
       })),
     };
@@ -1060,6 +1123,8 @@ export class Engine {
       channelProblem: this.channelProblem,
       pipelineLastError: this.pipelineLastError,
       pipelinePausedUntil: this.pipelinePausedUntil,
+      accountProblem: this.accountProblem,
+      accountName: this.accountUser === null ? null : this.accountUser.name,
     });
   }
 
@@ -1073,6 +1138,8 @@ export class Engine {
     channelProblem: string | null;
     pipelineLastError: string | null;
     pipelinePausedUntil: number;
+    accountProblem: string | null;
+    accountName: string | null;
   } {
     if (this.runsBot) {
       return {
@@ -1084,6 +1151,8 @@ export class Engine {
         channelProblem: this.channelProblem,
         pipelineLastError: this.pipelineLastError,
         pipelinePausedUntil: this.pipelinePausedUntil,
+        accountProblem: this.accountProblem,
+        accountName: this.accountUser === null ? null : this.accountUser.name,
       };
     }
     const saved = this.store.getState<{
@@ -1094,13 +1163,15 @@ export class Engine {
       channelProblem: string | null;
       pipelineLastError: string | null;
       pipelinePausedUntil: number;
+      accountProblem?: string | null;
+      accountName?: string | null;
     }>("runtime");
     if (saved === null) {
-      return { running: null, lastSeen: null, botState: this.botState, botDetail: null, botUsername: null, channelProblem: null, pipelineLastError: null, pipelinePausedUntil: 0 };
+      return { running: null, lastSeen: null, botState: this.botState, botDetail: null, botUsername: null, channelProblem: null, pipelineLastError: null, pipelinePausedUntil: 0, accountProblem: null, accountName: null };
     }
     // The running copy saves its state at least every half minute.
     const running = Date.now() - saved.at < 3 * 60_000;
-    return { ...saved, running, lastSeen: new Date(saved.at).toISOString() };
+    return { ...saved, accountProblem: saved.accountProblem ?? null, accountName: saved.accountName ?? null, running, lastSeen: new Date(saved.at).toISOString() };
   }
 
   async overview(backendName: string): Promise<Overview> {
@@ -1127,6 +1198,7 @@ export class Engine {
     const failing = sources.filter((row) => row.enabled === 1 && row.error_count >= 3);
     for (const row of failing.slice(0, 5)) problems.push(`Источник @${row.handle} не читается: ${row.last_error ?? "ошибка"}`);
     if (runtime.pipelineLastError !== null) problems.push(`Модель: ${runtime.pipelineLastError}`);
+    if (runtime.accountProblem !== null) problems.push(`Аккаунт Telegram: ${runtime.accountProblem}`);
     const failedStories = this.store.countByStatus().failed ?? 0;
     if (failedStories > 0) problems.push(`Не удалось подготовить черновиков: ${failedStories}. Посмотреть: queue failed; вернуть в работу: restore <номер>.`);
     return {
@@ -1277,6 +1349,18 @@ export class Engine {
   }
 
   async runBot(signal: AbortSignal): Promise<void> {
+    try {
+      await this.botLoop(signal);
+    } finally {
+      this.runsBot = false;
+      this.bot.dispose();
+      await this.closeAccount();
+      await this.login?.flow.cancel();
+      this.login = null;
+    }
+  }
+
+  private async botLoop(signal: AbortSignal): Promise<void> {
     let activeToken = "";
     let offset = 0;
     let savedAt = 0;
@@ -1348,7 +1432,256 @@ export class Engine {
         await sleep(this.botState === "error" ? 5_000 : 30_000, signal);
       }
     }
-    this.runsBot = false;
-    this.bot.dispose();
+  }
+
+  // ---- the Telegram account: media as in the original -------------------------
+
+  /** Drops the account client. With forget, the settings are read again on next use (and a block is lifted). */
+  private async closeAccount(forget = true): Promise<void> {
+    const account = this.account;
+    this.account = null;
+    if (forget) this.accountKey = "";
+    if (account !== null) await account.close().catch(() => undefined);
+  }
+
+  /** The account client for the current settings, rebuilt when they change; null when there is none to use. */
+  private async accountFor(config: Config): Promise<TelegramAccountLike | null> {
+    const { apiId, apiHash, session, media } = config.account;
+    const key = `${apiId}:${apiHash}:${session}:${media}:${config.network.proxy}`;
+    if (key !== this.accountKey) {
+      await this.closeAccount();
+      this.accountKey = key;
+      this.accountBlocked = false;
+      this.accountProblem = null;
+      this.accountUser = null;
+      if (this.runsBot) this.saveRuntime();
+    }
+    if (this.accountBlocked) return null;
+    this.account ??= this.accountFactory(config);
+    return this.account;
+  }
+
+  /**
+   * Called by the bot for every message it gets. A message the account just
+   * forwarded is taken as media for the post it came from and handled no
+   * further, and so is one that arrives after the wait for it ended. Returns
+   * true when the message was one of those.
+   */
+  captureForward(message: TgMessage): boolean {
+    const origin = message.forward_origin;
+    if (origin === undefined) return false;
+    // Only the account's own forwards; the owner may forward the same post by hand, and that is material.
+    if (this.accountUser !== null && String(message.from?.id ?? "") !== this.accountUser.id) return false;
+    const key = originKey(origin.date, origin.message_id);
+    const now = Date.now();
+    for (const [stale, until] of this.lateForwards) if (until < now) this.lateForwards.delete(stale);
+    const capture = this.captures.get(key);
+    if (capture === undefined) return this.lateForwards.has(key);
+    const sourceId = capture.expected.get(key) as number;
+    capture.got.set(sourceId, message);
+    if (capture.got.size >= capture.expected.size) capture.done();
+    return true;
+  }
+
+  /**
+   * Before the first draft: the story's source posts that have media get it
+   * from Telegram itself through the account, as the original script did:
+   * every photo and video of an album, large videos, GIFs and files.
+   * Without an account, or if Telegram refuses, the web preview's media stays.
+   */
+  private async takeStoryMedia(story: StoryRow, config: Config, signal: AbortSignal): Promise<void> {
+    if (!this.runsBot || this.botUser?.username === undefined || this.botState !== "ok") return;
+    const posts = this.store.postsOfStory(story.id).slice(0, 4);
+    const wanted = posts.filter((post) => {
+      if (post.media_checked_at !== null || post.source_handle === "manual") return false;
+      const media = parseMedia(post.media_json);
+      return media.length > 0 && media.some((item) => item.fileId === undefined);
+    });
+    if (wanted.length === 0) return;
+    const account = await this.accountFor(config);
+    if (account === null) return;
+    for (const post of wanted) {
+      if (signal.aborted) return;
+      await this.takePostMedia(account, post, this.botUser.username, signal);
+      if (this.accountBlocked || this.account === null) return;
+    }
+  }
+
+  private async takePostMedia(account: TelegramAccountLike, post: PostRow, botUsername: string, signal: AbortSignal): Promise<void> {
+    const handle = post.source_handle.toLowerCase();
+    let capture: MediaCapture | null = null;
+    let arrived: Promise<void> = Promise.resolve();
+    const keys: string[] = [];
+    let forwardedIds: number[] = [];
+    try {
+      if (this.accountUser === null) {
+        this.accountUser = await account.me();
+        if (this.runsBot) this.saveRuntime();
+      }
+      const forwarded = await account.forwardPost(handle, post.msg_id, botUsername, (items: ForwardItem[]) => {
+        const expected = new Map(items.map((item) => [originKey(item.originDate, item.originId), item.sourceId] as const));
+        arrived = new Promise<void>((resolve) => {
+          capture = { expected, got: new Map(), done: resolve };
+        });
+        for (const key of expected.keys()) {
+          keys.push(key);
+          this.captures.set(key, capture as unknown as MediaCapture);
+        }
+      });
+      forwardedIds = forwarded.forwardedIds;
+      // The bot picks the forwarded messages up in its own loop; wait for them, at most 25 seconds.
+      const waiting = new AbortController();
+      const stop = () => waiting.abort();
+      signal.addEventListener("abort", stop, { once: true });
+      const outcome = await Promise.race([arrived.then(() => "ok" as const), sleep(25_000, waiting.signal).then(() => "timeout" as const)]);
+      waiting.abort();
+      signal.removeEventListener("abort", stop);
+      // Stopping is not an answer: the post is tried again next time.
+      if (signal.aborted) return;
+      const got = (capture as MediaCapture | null)?.got ?? new Map<number, TgMessage>();
+      const media = [...got.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([, message]) => mediaOfMessage(message))
+        .filter((item): item is StoredMedia => item !== null);
+      if (media.length > 0 && (outcome === "ok" || media.length >= parseMedia(post.media_json).length)) {
+        this.store.setPostMedia(post.id, JSON.stringify(media));
+      } else {
+        this.store.setPostMedia(post.id, null);
+        if (outcome === "timeout") this.log("warn", "account", `Медиа поста ${post.url} не пришли боту вовремя; беру из веб-версии.`);
+      }
+      if (this.accountProblem !== null) {
+        this.accountProblem = null;
+        this.saveRuntime();
+      }
+    } catch (cause) {
+      if (signal.aborted) return;
+      const error = cause instanceof AccountError ? cause : new AccountError("failed", errorMessage(cause));
+      if (error.code === "unauthorized") {
+        this.accountBlocked = true;
+        this.accountProblem = `${error.message} (Настройки → Аккаунт Telegram).`;
+        this.log("error", "account", `Аккаунт Telegram: ${this.accountProblem} Медиа берутся из веб-версии.`);
+        void this.alertOwner(`Аккаунт Telegram отключён: ${escapeHtml(error.message)}. Пока медиа берутся из веб-версии, большие видео не приложатся. Войдите заново в настройках.`);
+        this.saveRuntime();
+        await this.closeAccount(false);
+        return;
+      }
+      if (error.code === "failed") {
+        // No answer from Telegram: this draft goes on with the web preview's media; the next post gets a fresh connection.
+        this.accountProblem = error.message;
+        this.saveRuntime();
+        this.log("warn", "account", `Аккаунт Telegram: ${error.message}. Медиа поста ${post.url} пока из веб-версии.`);
+        this.store.setPostMedia(post.id, null);
+        await this.closeAccount(false);
+        return;
+      }
+      // A protected channel, a deleted post, a flood wait: this post keeps the web preview's media.
+      this.store.setPostMedia(post.id, null);
+      this.log("warn", "account", `Медиа поста ${post.url} через аккаунт не взять: ${error.message}. Беру из веб-версии.`);
+    } finally {
+      // Whatever still comes for these messages a little later is not the owner's material: swallow it for three minutes.
+      for (const key of keys) {
+        this.captures.delete(key);
+        this.lateForwards.set(key, Date.now() + 3 * 60_000);
+      }
+      if (forwardedIds.length > 0) {
+        await account.deleteForwarded(botUsername, forwardedIds).catch((cause: unknown) => {
+          this.log("warn", "account", `Не удалось удалить пересланный пост из чата с ботом: ${errorMessage(cause)}`);
+        });
+      }
+    }
+  }
+
+  async accountStatus(): Promise<AccountStatus> {
+    const config = await this.config();
+    const runtime = this.runtimeView();
+    const connected = config.account.apiId !== null && config.account.apiHash !== "" && config.account.session !== "";
+    return {
+      connected,
+      apiId: config.account.apiId,
+      hasApiHash: config.account.apiHash !== "",
+      media: config.account.media,
+      user: this.accountUser ?? (connected && runtime.accountName !== null ? { id: "", name: runtime.accountName, username: null } : null),
+      problem: runtime.accountProblem,
+      loginStep: this.login === null || this.login.step.step === "done" ? null : this.login.step.step,
+      loginHint: this.login?.step.step === "password" ? this.login.step.hint : null,
+    };
+  }
+
+  /** First step of signing in: Telegram sends a code to the account. */
+  async accountLoginStart(input: { apiId: number | null; apiHash: string; phone: string }): Promise<AccountStatus> {
+    const config = await this.config();
+    const apiId = input.apiId ?? config.account.apiId;
+    const apiHash = input.apiHash.trim() !== "" ? input.apiHash.trim() : config.account.apiHash;
+    if (apiId === null || apiHash === "") throw new EngineError("Нужны api_id и api_hash: их выдают на my.telegram.org → API development tools");
+    if (!/^\+?\d{7,15}$/u.test(input.phone.replace(/[\s()-]/gu, ""))) throw new EngineError("Номер телефона нужен целиком, с кодом страны: +79991234567");
+    await this.login?.flow.cancel();
+    this.login = null;
+    const flow = new AccountLogin({ apiId, apiHash }, config.network.proxy);
+    let step: LoginStep;
+    try {
+      step = await flow.sendCode(input.phone);
+    } catch (cause) {
+      await flow.cancel();
+      throw cause;
+    }
+    this.login = { flow, apiId, apiHash, step };
+    this.platform.changed();
+    return this.accountStatus();
+  }
+
+  /** Second step: the code from Telegram. Then, if the account has a cloud password, the third. */
+  async accountLoginCode(code: string): Promise<AccountStatus> {
+    const login = this.login;
+    if (login === null || login.step.step !== "code") throw new EngineError("Сначала запросите код");
+    login.step = await login.flow.submitCode(code);
+    if (login.step.step === "done") await this.finishLogin(login.apiId, login.apiHash, login.step.session, login.step.user);
+    this.platform.changed();
+    return this.accountStatus();
+  }
+
+  async accountLoginPassword(password: string): Promise<AccountStatus> {
+    const login = this.login;
+    if (login === null || login.step.step !== "password") throw new EngineError("Пароль сейчас не нужен");
+    login.step = await login.flow.submitPassword(password);
+    if (login.step.step === "done") await this.finishLogin(login.apiId, login.apiHash, login.step.session, login.step.user);
+    this.platform.changed();
+    return this.accountStatus();
+  }
+
+  private async finishLogin(apiId: number, apiHash: string, session: string, user: AccountUser): Promise<void> {
+    this.login = null;
+    await this.updateConfig((config) => {
+      config.account.apiId = apiId;
+      config.account.apiHash = apiHash;
+      config.account.session = session;
+      config.account.media = true;
+    });
+    await this.closeAccount();
+    this.accountUser = user;
+    this.accountProblem = null;
+    if (this.runsBot) this.saveRuntime();
+    this.log("info", "account", `Аккаунт Telegram подключён: ${user.name}${user.username === null ? "" : ` (@${user.username})`}. Медиа берутся через него.`);
+  }
+
+  /** Forgets the login (the session stays listed in Telegram until ended there or it expires). */
+  async accountLogout(): Promise<AccountStatus> {
+    await this.login?.flow.cancel();
+    this.login = null;
+    await this.updateConfig((config) => {
+      config.account.session = "";
+    });
+    await this.closeAccount();
+    this.accountUser = null;
+    this.accountProblem = null;
+    if (this.runsBot) this.saveRuntime();
+    this.log("info", "account", "Аккаунт Telegram отключён: медиа берутся из веб-версии.");
+    return this.accountStatus();
+  }
+
+  async accountLoginCancel(): Promise<AccountStatus> {
+    await this.login?.flow.cancel();
+    this.login = null;
+    this.platform.changed();
+    return this.accountStatus();
   }
 }

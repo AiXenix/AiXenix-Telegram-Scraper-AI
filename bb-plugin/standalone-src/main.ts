@@ -19,6 +19,7 @@ import {
   resolveConfig,
   type Config,
 } from "../src/config.ts";
+import { TelegramAccount, sessionFromTelethon } from "../src/account.ts";
 import { Store, migrate, type StoryStatus } from "../src/db.ts";
 import { Engine, EngineError, type StoryView } from "../src/engine.ts";
 import { createOpenAiLlm } from "../src/llm/openai.ts";
@@ -50,6 +51,9 @@ const HELP = `Редакция новостей — отдельный запу�
   reset --yes                   начать с чистого листа: забыть всё собранное, следить с текущего момента
   step                          один проход конвейера: разбор или черновик (для проверки)
   llm-test [filter|writer]      проверить, что модель отвечает
+  account login                 войти в аккаунт Telegram: фото, видео и файлы постов берутся через него, как в Telethon-скрипте
+  account status | logout       аккаунт Telegram: состояние, выйти
+  account import-telethon <файл.session>  взять вход из сессии Telethon (если она ещё действует)
   config check                  проверить файл настроек и найти незаполненные значения
   config show                   показать настройки без секретов
   config init                   создать файл настроек с примером
@@ -410,6 +414,94 @@ async function main(): Promise<number> {
         );
         return overview.pipeline.lastError === null ? 0 : 1;
       }
+      case "account": {
+        const action = args.rest[0] ?? "status";
+        const show = (status: Awaited<ReturnType<Engine["accountStatus"]>>) =>
+          status.connected
+            ? `Аккаунт Telegram подключён${status.user === null ? "" : `: ${status.user.name}${status.user.username === null ? "" : ` (@${status.user.username})`}`}. Медиа через аккаунт: ${status.media ? "да" : "нет"}.${status.problem === null ? "" : `\n! ${status.problem}`}`
+            : `Аккаунт Telegram не подключён: медиа берутся из веб-версии, большие видео и файлы туда не попадают. Войти: account login${status.problem === null ? "" : `\n! ${status.problem}`}`;
+        if (action === "status") {
+          console.log(show(await engine.accountStatus()));
+          return 0;
+        }
+        if (action === "logout") {
+          console.log(show(await engine.accountLogout()));
+          console.log("Завершить сам сеанс можно в Telegram: Настройки → Устройства (сеанс «Newsdesk»).");
+          return 0;
+        }
+        if (action === "import-telethon") {
+          const file = args.rest[1];
+          if (file === undefined || !existsSync(file)) throw new EngineError("Укажите файл сессии Telethon: account import-telethon путь/к/файлу.session");
+          if (config.account.apiId === null || config.account.apiHash === "") throw new EngineError("Сначала впишите account.apiId и account.apiHash (те же, что в Telethon-скрипте)");
+          const telethon = new DatabaseSync(file, { readOnly: true });
+          const row = telethon.prepare("SELECT dc_id, server_address, port, auth_key FROM sessions").get() as
+            | { dc_id: number; server_address: string; port: number; auth_key: Uint8Array }
+            | undefined;
+          telethon.close();
+          if (row === undefined || row.auth_key === null) throw new EngineError("В файле нет входа в аккаунт");
+          const session = await sessionFromTelethon(row);
+          const probe = new TelegramAccount({ apiId: config.account.apiId, apiHash: config.account.apiHash }, session, config.network.proxy);
+          try {
+            const user = await probe.me();
+            await engine.updateConfig((next) => {
+              next.account.session = session;
+              next.account.media = true;
+            });
+            console.log(`Вход взят из ${file}: ${user.name}${user.username === null ? "" : ` (@${user.username})`}.`);
+            return 0;
+          } finally {
+            await probe.close();
+          }
+        }
+        if (action !== "login") throw new EngineError("Команды: account login | account status | account logout | account import-telethon <файл>");
+        const { createInterface } = await import("node:readline/promises");
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          console.log("Вход в аккаунт Telegram. api_id и api_hash выдают на https://my.telegram.org → API development tools.");
+          const apiIdText = config.account.apiId === null ? await rl.question("api_id: ") : "";
+          const apiHash = config.account.apiHash === "" ? await rl.question("api_hash: ") : "";
+          const phone = await rl.question("Номер телефона аккаунта (+79991234567): ");
+          let status = await engine.accountLoginStart({ apiId: apiIdText === "" ? null : Number(apiIdText.trim()), apiHash, phone });
+          for (let attempt = 0; status.loginStep === "code" && attempt < 3; attempt += 1) {
+            try {
+              status = await engine.accountLoginCode(await rl.question("Код из Telegram: "));
+            } catch (cause) {
+              console.log(`! ${errorMessage(cause)}`);
+            }
+          }
+          // The cloud password is typed without echo.
+          const askHidden = async (prompt: string): Promise<string> => {
+            const output = rl as unknown as { _writeToOutput?: (text: string) => void; output: NodeJS.WritableStream };
+            const original = output._writeToOutput;
+            output._writeToOutput = (text: string) => {
+              if (text.startsWith(prompt) || text === "\r\n" || text === "\n") output.output.write(text);
+            };
+            try {
+              return await rl.question(prompt);
+            } finally {
+              output._writeToOutput = original;
+              process.stdout.write("\n");
+            }
+          };
+          for (let attempt = 0; status.loginStep === "password" && attempt < 3; attempt += 1) {
+            try {
+              status = await engine.accountLoginPassword(await askHidden(`Облачный пароль${status.loginHint === null ? "" : ` (подсказка: ${status.loginHint})`}: `));
+            } catch (cause) {
+              console.log(`! ${errorMessage(cause)}`);
+            }
+          }
+          if (!status.connected || status.loginStep !== null) {
+            await engine.accountLoginCancel();
+            console.log("Вход не завершён.");
+            return 1;
+          }
+          console.log(show(status));
+          console.log(`Вход записан в ${args.configPath} (account.session). Этот файл теперь открывает аккаунт: никому его не передавайте.`);
+          return 0;
+        } finally {
+          rl.close();
+        }
+      }
       case "llm-test": {
         const which = args.rest[0] === "writer" ? "writer" : "filter";
         const model = which === "filter" ? config.llm.filterModel : config.llm.writerModel;
@@ -450,6 +542,8 @@ async function main(): Promise<number> {
 main().then(
   (code) => {
     process.exitCode = code;
+    // The Telegram account's connection can leave timers behind; a finished command should not hang on them.
+    setTimeout(() => process.exit(code), 1000).unref();
   },
   (cause: unknown) => {
     console.error(`Сбой: ${errorMessage(cause)}`);

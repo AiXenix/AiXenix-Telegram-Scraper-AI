@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-23
+
+### Added
+
+- Optional Telegram account for media, as in Telethon scripts: before the draft, the account forwards the source post (with its whole album) to the bot, which keeps Telegram's file ids; the forwarded copy is deleted at once. Large videos, every album item, GIFs and files are attached and published, whatever their size.
+- Sign-in on the settings page (api_id, api_hash, phone, code, cloud password) and `newsdesk account login | status | logout | import-telethon` in the script; `bb newsdesk account status | logout` in bb.
+- GIFs and files can be sent and published; albums of files are supported.
+
+### Changed
+
+- An album with one item the web preview cannot give keeps the rest instead of dropping all media.
+
 ## [1.1.0] - 2026-11-23
 
 ### Added
@@ -39,6 +51,7 @@ First public release. The repository was briefly published as `AiXenix-Telegram-
 - Clean start (reset) from the admin page, `bb newsdesk reset --yes` and `newsdesk reset --yes`.
 - Tests: unit tests, an end-to-end scenario with a strict fake Telegram, and a live scenario script.
 
-[Unreleased]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/releases/tag/v1.0.0
