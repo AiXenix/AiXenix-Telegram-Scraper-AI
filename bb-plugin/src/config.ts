@@ -77,8 +77,6 @@ export const configSchema = z
         maxAgeHours: z.number().int().min(1).max(24 * 14),
         /** How far back published, rejected and pending stories block repeats. */
         memoryDays: z.number().int().min(1).max(180),
-        /** Also the most proposals allowed to wait for a decision at once; drafting pauses above it. */
-        maxProposalsPerDay: z.number().int().min(1).max(200),
         /** A proposal nobody decided on within this many hours moves to the filtered list. */
         proposalTtlHours: z.number().int().min(1).max(24 * 30),
       })
@@ -152,7 +150,6 @@ export const DEFAULT_CONFIG: Config = {
     minTextLength: 15,
     maxAgeHours: 36,
     memoryDays: 21,
-    maxProposalsPerDay: 20,
     proposalTtlHours: 48,
   },
   schedule: {
@@ -178,6 +175,24 @@ export function deepMerge<T>(base: T, patch: unknown): T {
   return result as T;
 }
 
+/** Settings older versions had and this one no longer uses; a file that still has them loads as before. */
+const RETIRED: [section: string, key: string][] = [
+  // Removed in 1.1: proposals are no longer rationed, everything that passes the filter is sent.
+  ["editorial", "maxProposalsPerDay"],
+];
+
+function withoutRetired(stored: Record<string, unknown>): Record<string, unknown> {
+  const copy: Record<string, unknown> = { ...stored };
+  for (const [section, key] of RETIRED) {
+    const part = copy[section];
+    if (isPlainObject(part) && key in part) {
+      const { [key]: _dropped, ...rest } = part;
+      copy[section] = rest;
+    }
+  }
+  return copy;
+}
+
 export interface ConfigIssue {
   path: string;
   message: string;
@@ -189,7 +204,7 @@ export interface ConfigIssue {
  * readable list when a value has the wrong type or range.
  */
 export function resolveConfig(stored: unknown): Config {
-  const merged = deepMerge(DEFAULT_CONFIG, isPlainObject(stored) ? stored : {});
+  const merged = deepMerge(DEFAULT_CONFIG, withoutRetired(isPlainObject(stored) ? stored : {}));
   const parsed = configSchema.safeParse(merged);
   if (parsed.success) return parsed.data;
   const issues = parsed.error.issues.map((issue) => `${issue.path.join(".") || "(корень)"}: ${issue.message}`);

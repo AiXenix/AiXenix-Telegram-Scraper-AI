@@ -1,4 +1,4 @@
-// AiXenix Telegram Scraper AI 1.0.0, standalone build. Generated from bb-plugin/; do not edit by hand.
+// AiXenix Telegram Scraper AI 1.1.0, standalone build. Generated from bb-plugin/; do not edit by hand.
 import { createRequire as __createRequire } from "node:module";
 const require = __createRequire(import.meta.url);
 var __create = Object.create;
@@ -51325,8 +51325,6 @@ var configSchema = external_exports.object({
     maxAgeHours: external_exports.number().int().min(1).max(24 * 14),
     /** How far back published, rejected and pending stories block repeats. */
     memoryDays: external_exports.number().int().min(1).max(180),
-    /** Also the most proposals allowed to wait for a decision at once; drafting pauses above it. */
-    maxProposalsPerDay: external_exports.number().int().min(1).max(200),
     /** A proposal nobody decided on within this many hours moves to the filtered list. */
     proposalTtlHours: external_exports.number().int().min(1).max(24 * 30)
   }).strict(),
@@ -51387,7 +51385,6 @@ var DEFAULT_CONFIG = {
     minTextLength: 15,
     maxAgeHours: 36,
     memoryDays: 21,
-    maxProposalsPerDay: 20,
     proposalTtlHours: 48
   },
   schedule: {
@@ -51409,8 +51406,23 @@ function deepMerge(base, patch) {
   }
   return result;
 }
+var RETIRED = [
+  // Removed in 1.1: proposals are no longer rationed, everything that passes the filter is sent.
+  ["editorial", "maxProposalsPerDay"]
+];
+function withoutRetired(stored) {
+  const copy = { ...stored };
+  for (const [section, key] of RETIRED) {
+    const part = copy[section];
+    if (isPlainObject2(part) && key in part) {
+      const { [key]: _dropped, ...rest } = part;
+      copy[section] = rest;
+    }
+  }
+  return copy;
+}
 function resolveConfig(stored) {
-  const merged = deepMerge(DEFAULT_CONFIG, isPlainObject2(stored) ? stored : {});
+  const merged = deepMerge(DEFAULT_CONFIG, withoutRetired(isPlainObject2(stored) ? stored : {}));
   const parsed = configSchema.safeParse(merged);
   if (parsed.success) return parsed.data;
   const issues = parsed.error.issues.map((issue2) => `${issue2.path.join(".") || "(\u043A\u043E\u0440\u0435\u043D\u044C)"}: ${issue2.message}`);
@@ -51581,7 +51593,9 @@ var MIGRATIONS = [
      key TEXT PRIMARY KEY,
      value TEXT NOT NULL
    )`,
-  `ALTER TABLE stories ADD COLUMN duplicate_of INTEGER`
+  `ALTER TABLE stories ADD COLUMN duplicate_of INTEGER`,
+  `ALTER TABLE stories ADD COLUMN source_chat_id INTEGER`,
+  `ALTER TABLE stories ADD COLUMN source_message_id INTEGER`
 ];
 function migrate(db) {
   const row = db.prepare("PRAGMA user_version").get();
@@ -51763,11 +51777,38 @@ var Store = class {
   nextCandidates(limit) {
     return this.db.prepare(`SELECT * FROM stories WHERE status = 'candidate' ORDER BY COALESCE(score, 0) DESC, id ASC LIMIT ?`).all(limit);
   }
-  proposedSince(sinceIso) {
+  /**
+   * Stories that passed the filter on their own and whose original news has
+   * not been shown to the owner yet. A story drafted while Telegram was out of
+   * reach still gets its original first, before its proposal goes out.
+   */
+  unsentSourceCards() {
     return this.db.prepare(
-      `SELECT COUNT(*) AS n FROM stories
-           WHERE status IN ('proposed', 'publishing', 'published', 'rejected') AND draft_version > 0 AND created_at >= ?`
-    ).get(sinceIso).n;
+      `SELECT * FROM stories
+         WHERE manual = 0 AND source_message_id IS NULL
+           AND (status = 'candidate' OR (status = 'proposed' AND proposal_message_ids IS NULL))
+         ORDER BY id ASC LIMIT 20`
+    ).all();
+  }
+  /** Records a sent original only if the story still waits for it; false means the story moved on meanwhile. */
+  claimSourceCard(id, chatId, messageId) {
+    const info = this.db.prepare(
+      `UPDATE stories SET source_chat_id = ?, source_message_id = ?, updated_at = ?
+         WHERE id = ? AND source_message_id IS NULL AND status IN ('candidate', 'proposed')`
+    ).run(chatId, messageId, nowIso(), id);
+    return Number(info.changes) > 0;
+  }
+  /** Records a sent proposal only if the story still waits for a decision and has none in the chat. */
+  claimProposal(id, chatId, messageIds, media) {
+    const info = this.db.prepare(
+      `UPDATE stories SET proposal_chat_id = ?, proposal_message_ids = ?, proposal_media = ?, updated_at = ?
+         WHERE id = ? AND status = 'proposed' AND proposal_message_ids IS NULL`
+    ).run(chatId, JSON.stringify(messageIds), media, nowIso(), id);
+    return Number(info.changes) > 0;
+  }
+  /** Proposals that have waited longer than the cutoff, oldest first. */
+  staleProposals(cutoffIso, limit) {
+    return this.db.prepare(`SELECT * FROM stories WHERE status = 'proposed' AND updated_at < ? ORDER BY updated_at ASC LIMIT ?`).all(cutoffIso, limit);
   }
   unsentProposals() {
     return this.db.prepare(`SELECT * FROM stories WHERE status = 'proposed' AND proposal_message_ids IS NULL ORDER BY id ASC LIMIT 10`).all();
@@ -51992,13 +52033,14 @@ var TelegramApi = class {
     );
   }
   sendText(chatId, html3, extra = {}, options) {
+    const preview = extra.disablePreview === true ? { link_preview_options: { is_disabled: true } } : extra.previewUrl === void 0 ? {} : { link_preview_options: { url: extra.previewUrl, prefer_large_media: true } };
     return this.call(
       "sendMessage",
       {
         chat_id: chatId,
         text: html3,
         parse_mode: "HTML",
-        ...extra.disablePreview === true ? { link_preview_options: { is_disabled: true } } : {},
+        ...preview,
         ...extra.keyboard === void 0 ? {} : { reply_markup: { inline_keyboard: extra.keyboard } },
         ...extra.replyTo === void 0 ? {} : { reply_parameters: { message_id: extra.replyTo, allow_sending_without_reply: true } }
       },
@@ -52673,10 +52715,11 @@ function fileIdOf(message) {
   }
   return message.video?.file_id ?? message.animation?.file_id ?? message.document?.file_id ?? null;
 }
-async function sendPost(api, httpFetch, chatId, html3, media, signal) {
+async function sendPost(api, httpFetch, chatId, html3, media, signal, options = {}) {
   const items = media.filter((item) => item.kind === "photo" || item.kind === "video").slice(0, 10);
+  const reply = options.replyTo === void 0 ? {} : { reply_parameters: { message_id: options.replyTo, allow_sending_without_reply: true } };
   if (items.length === 0) {
-    const message = await api.sendText(chatId, html3, {}, { signal });
+    const message = await api.sendText(chatId, html3, options.replyTo === void 0 ? {} : { replyTo: options.replyTo }, { signal });
     return { messageIds: [message.message_id], media: [] };
   }
   if (visibleLength(html3) > CAPTION_LIMIT) {
@@ -52710,7 +52753,8 @@ async function sendPost(api, httpFetch, chatId, html3, media, signal) {
         [isVideo ? "video" : "photo"]: references[0],
         caption: html3,
         parse_mode: "HTML",
-        ...isVideo ? { supports_streaming: true } : {}
+        ...isVideo ? { supports_streaming: true } : {},
+        ...reply
       };
       const method = isVideo ? "sendVideo" : "sendPhoto";
       const message = files.length === 0 ? await api.call(method, params2, { signal }) : await api.upload(method, params2, files, { signal });
@@ -52725,7 +52769,7 @@ async function sendPost(api, httpFetch, chatId, html3, media, signal) {
       media: references[index2],
       ...index2 === 0 ? { caption: html3, parse_mode: "HTML" } : {}
     }));
-    const params = { chat_id: chatId, media: group };
+    const params = { chat_id: chatId, media: group, ...reply };
     const messages = files.length === 0 ? await api.call("sendMediaGroup", params, { signal }) : await api.upload("sendMediaGroup", params, files, { signal });
     const sentMedia = [];
     messages.forEach((message, index2) => {
@@ -52793,7 +52837,7 @@ function entitiesToPlain(text3, entities) {
 }
 var HELP = [
   "<b>\u0427\u0442\u043E \u044F \u0443\u043C\u0435\u044E</b>",
-  "\u0421\u0430\u043C \u0441\u043B\u0435\u0436\u0443 \u0437\u0430 \u043A\u0430\u043D\u0430\u043B\u0430\u043C\u0438 \u0438\u0437 \u0441\u043F\u0438\u0441\u043A\u0430, \u043E\u0442\u0431\u0438\u0440\u0430\u044E \u043D\u043E\u0432\u043E\u0441\u0442\u0438 \u0438 \u043F\u0440\u0438\u0441\u044B\u043B\u0430\u044E \u0433\u043E\u0442\u043E\u0432\u044B\u0435 \u043F\u043E\u0441\u0442\u044B \u0441 \u043A\u043D\u043E\u043F\u043A\u0430\u043C\u0438 \xAB\u0420\u0430\u0437\u043C\u0435\u0441\u0442\u0438\u0442\u044C\xBB \u0438 \xAB\u041E\u0442\u043A\u0430\u0437\u0430\u0442\u044C\xBB.",
+  "\u0421\u0430\u043C \u0441\u043B\u0435\u0436\u0443 \u0437\u0430 \u043A\u0430\u043D\u0430\u043B\u0430\u043C\u0438 \u0438\u0437 \u0441\u043F\u0438\u0441\u043A\u0430. \u041A\u0430\u043A \u0442\u043E\u043B\u044C\u043A\u043E \u043F\u043E\u044F\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u043D\u043E\u0432\u043E\u0441\u0442\u044C, \u0441\u0440\u0430\u0437\u0443 \u043F\u0440\u0438\u0441\u044B\u043B\u0430\u044E \u0435\u0451 \u043E\u0440\u0438\u0433\u0438\u043D\u0430\u043B, \u0430 \u0441\u043B\u0435\u0434\u043E\u043C, \u043E\u0442\u0432\u0435\u0442\u043E\u043C \u043D\u0430 \u043D\u0435\u0433\u043E, \u2014 \u0433\u043E\u0442\u043E\u0432\u044B\u0439 \u043F\u043E\u0441\u0442 \u0441 \u043A\u043D\u043E\u043F\u043A\u0430\u043C\u0438 \xAB\u0420\u0430\u0437\u043C\u0435\u0441\u0442\u0438\u0442\u044C\xBB \u0438 \xAB\u041E\u0442\u043A\u0430\u0437\u0430\u0442\u044C\xBB. \u041D\u0435\u0438\u043D\u0442\u0435\u0440\u0435\u0441\u043D\u043E\u0435 \u043C\u043E\u0436\u043D\u043E \u043E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C \u0441\u0440\u0430\u0437\u0443, \u043D\u0435 \u0434\u043E\u0436\u0438\u0434\u0430\u044F\u0441\u044C \u043F\u043E\u0441\u0442\u0430.",
   "",
   "\u041F\u0435\u0440\u0435\u0448\u043B\u0438\u0442\u0435 \u043C\u043D\u0435 \u043B\u044E\u0431\u043E\u0439 \u043F\u043E\u0441\u0442 \u2014 \u043F\u043E\u0434\u0433\u043E\u0442\u043E\u0432\u043B\u044E \u0435\u0433\u043E \u0432\u043D\u0435 \u043E\u0447\u0435\u0440\u0435\u0434\u0438.",
   "",
@@ -52818,6 +52862,10 @@ function mainKeyboard(storyId, tag) {
     ]
   ];
 }
+function sourceKeyboard(storyId, tag) {
+  return [[{ text: "\u274C \u041E\u0442\u043A\u0430\u0437\u0430\u0442\u044C", callback_data: `r:${storyId}@${tag}` }]];
+}
+var SOURCE_TEXT_LIMIT = 3500;
 function editKeyboard(storyId, tag) {
   return [
     [{ text: "\u041D\u0430\u043F\u0438\u0441\u0430\u0442\u044C, \u0447\u0442\u043E \u0438\u0437\u043C\u0435\u043D\u0438\u0442\u044C", callback_data: `ei:${storyId}@${tag}` }],
@@ -52870,29 +52918,88 @@ var BotController = class {
     if (notes.length > 0) lines.push(`\u0417\u0430\u043C\u0435\u0442\u043A\u0430: ${escapeHtml(truncate(notes.join(" "), 400))}`);
     return lines.join("\n");
   }
-  controlMessageId(story) {
-    if (story.proposal_chat_id === null || story.proposal_message_ids === null) return null;
+  /** The message with the original news, if one was sent to this chat. */
+  sourceCard(story) {
+    if (story.source_chat_id === null || story.source_message_id === null || story.source_message_id <= 0) return null;
+    return { chatId: story.source_chat_id, messageId: story.source_message_id };
+  }
+  /** The preview and the message with buttons (or, once decided, the outcome line). */
+  proposalIds(story) {
+    if (story.proposal_chat_id === null || story.proposal_message_ids === null) return [];
     try {
-      const ids = JSON.parse(story.proposal_message_ids);
-      const last2 = ids[ids.length - 1];
-      return last2 === void 0 ? null : { chatId: story.proposal_chat_id, messageId: last2 };
+      return JSON.parse(story.proposal_message_ids);
     } catch {
-      return null;
+      return [];
+    }
+  }
+  /** The message with buttons, to edit in place. Only the proposal's own message: never the original news. */
+  controlMessageId(story) {
+    const last2 = this.proposalIds(story).at(-1);
+    return story.proposal_chat_id === null || last2 === void 0 ? null : { chatId: story.proposal_chat_id, messageId: last2 };
+  }
+  /**
+   * Takes the original news out of the chat. It is deleted on its own, not in
+   * one call with newer messages: Telegram refuses a whole batch if one message
+   * is older than 48 hours. If it cannot be deleted, its button is taken away
+   * so it can no longer act. Returns 1 when the message went.
+   */
+  async retireSourceCard(api, story) {
+    const card = this.sourceCard(story);
+    if (card === null) return 0;
+    try {
+      await api.deleteMessages(card.chatId, [card.messageId]);
+      return 1;
+    } catch {
+      await api.call("editMessageReplyMarkup", { chat_id: card.chatId, message_id: card.messageId, reply_markup: { inline_keyboard: [] } }).catch(() => void 0);
+      return 0;
+    }
+  }
+  /**
+   * Shows the owner the original news the moment it passes the filter, before
+   * the model has written anything: source, title, the post's own text and its
+   * preview with the picture. The draft comes later as a reply to this message.
+   */
+  async sendSourceCard(api, ownerChatId, story, signal) {
+    const posts = this.engine.store.postsOfStory(story.id);
+    const first2 = posts[0];
+    const lines = [];
+    if (first2 === void 0) {
+      lines.push(`\u{1F195} <b>\u2116${story.id}</b>`);
+    } else {
+      const label = `@${first2.source_handle}`;
+      const link = first2.url === "" ? escapeHtml(label) : `<a href="${escapeHtml(first2.url)}">${escapeHtml(label)}</a>`;
+      lines.push(`\u{1F195} <b>\u2116${story.id}</b> \xB7 ${link}${posts.length > 1 ? ` \u0438 \u0435\u0449\u0451 ${posts.length - 1}` : ""}`);
+    }
+    lines.push(`<b>${escapeHtml(story.title)}</b>`);
+    const original = (first2?.text ?? story.summary).trim();
+    if (original !== "") lines.push("", escapeHtml(truncate(original, SOURCE_TEXT_LIMIT)));
+    lines.push("", "<i>\u270D\uFE0F \u041F\u043E\u0441\u0442 \u043E\u0442 \u0418\u0418 \u043F\u0440\u0438\u0448\u043B\u044E \u043E\u0442\u0432\u0435\u0442\u043E\u043C \u043D\u0430 \u044D\u0442\u043E \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435.</i>");
+    const previewUrl = first2 !== void 0 && first2.url !== "" ? first2.url : void 0;
+    const card = await api.sendText(
+      ownerChatId,
+      lines.join("\n"),
+      { keyboard: sourceKeyboard(story.id, this.tag()), ...previewUrl === void 0 ? { disablePreview: true } : { previewUrl } },
+      { signal }
+    );
+    if (!this.engine.store.claimSourceCard(story.id, ownerChatId, card.message_id)) {
+      await api.deleteMessages(ownerChatId, [card.message_id]).catch(() => void 0);
     }
   }
   /** Sends the preview (exactly what the channel will get) and the message with buttons under it. */
   async sendProposal(api, ownerChatId, story, signal) {
     if (story.draft_html === null) return;
     const store = this.engine.store;
+    const card = this.sourceCard(story);
+    const replyTo = card !== null && card.chatId === ownerChatId ? { replyTo: card.messageId } : {};
     let sent;
     let mediaNote = null;
     try {
-      sent = await sendPost(api, this.engine.platform.fetch, ownerChatId, story.draft_html, this.engine.mediaFor(story), signal);
+      sent = await sendPost(api, this.engine.platform.fetch, ownerChatId, story.draft_html, this.engine.mediaFor(story), signal, replyTo);
     } catch (cause) {
       if (!(cause instanceof MediaError)) throw cause;
       mediaNote = `\u041C\u0435\u0434\u0438\u0430 \u043D\u0435 \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u043E: ${cause.message}.`;
       store.updateStory(story.id, { media_post_id: null, proposal_media: null });
-      sent = await sendPost(api, this.engine.platform.fetch, ownerChatId, story.draft_html, [], signal);
+      sent = await sendPost(api, this.engine.platform.fetch, ownerChatId, story.draft_html, [], signal, replyTo);
     }
     const control = await api.sendText(
       ownerChatId,
@@ -52900,11 +53007,10 @@ var BotController = class {
       { keyboard: mainKeyboard(story.id, this.tag()), replyTo: sent.messageIds[0], disablePreview: true },
       { signal }
     );
-    store.updateStory(story.id, {
-      proposal_chat_id: ownerChatId,
-      proposal_message_ids: JSON.stringify([...sent.messageIds, control.message_id]),
-      proposal_media: sent.media.length > 0 ? JSON.stringify(sent.media) : null
-    });
+    const ids = [...sent.messageIds, control.message_id];
+    if (!store.claimProposal(story.id, ownerChatId, ids, sent.media.length > 0 ? JSON.stringify(sent.media) : null)) {
+      await api.deleteMessages(ownerChatId, ids).catch(() => void 0);
+    }
   }
   async editControl(story, html3, keyboard) {
     const target = this.controlMessageId(story);
@@ -52917,36 +53023,35 @@ var BotController = class {
     }
   }
   /**
-   * Takes a proposal out of the owner's chat: deletes its preview and its
-   * message with buttons. Returns how many messages went. If Telegram refuses
-   * (messages older than 48 hours cannot be deleted), the buttons are removed instead.
+   * Takes a story out of the owner's chat: deletes the preview and the
+   * message with buttons, and the original news unless keepSource (a new
+   * variant of the draft replaces only the preview). Returns how many messages
+   * went. If Telegram refuses (messages older than 48 hours cannot be
+   * deleted), the buttons are removed instead.
    */
-  async removeProposal(api, story) {
-    if (story.proposal_chat_id === null || story.proposal_message_ids === null) return 0;
-    let ids = [];
-    try {
-      ids = JSON.parse(story.proposal_message_ids);
-    } catch {
-      return 0;
+  async removeProposal(api, story, options = {}) {
+    let removed = 0;
+    const ids = this.proposalIds(story);
+    if (story.proposal_chat_id !== null && ids.length > 0) {
+      try {
+        await api.deleteMessages(story.proposal_chat_id, ids);
+        removed += ids.length;
+      } catch {
+        await this.retireProposal(story, "\u0441\u043D\u044F\u0442\u043E");
+      }
     }
-    if (ids.length === 0) return 0;
-    try {
-      await api.deleteMessages(story.proposal_chat_id, ids);
-      return ids.length;
-    } catch {
-      await this.retireProposal(story, "\u0441\u043D\u044F\u0442\u043E");
-      return 0;
-    }
+    if (options.keepSource !== true) removed += await this.retireSourceCard(api, story);
+    return removed;
   }
   /** Marks an outdated proposal so its buttons cannot be pressed by mistake. */
   retireProposal(story, label) {
     return this.editControl(story, `<b>\u2116${story.id}</b> \xB7 ${escapeHtml(label)}`, null);
   }
-  /** Deletes a proposal's messages from the chat (used when a new variant replaces it). */
+  /** Deletes a proposal's preview and buttons when a new variant replaces it; the original news stays. */
   async dropProposal(story) {
     const api = this.engine.api(await this.engine.config());
     if (api === null) return;
-    await this.removeProposal(api, story);
+    await this.removeProposal(api, story, { keepSource: true });
   }
   /** The first words of the post, for the one-line outcome message. */
   opening(story) {
@@ -52955,36 +53060,56 @@ var BotController = class {
     return escapeHtml(truncate(line, 90));
   }
   /**
-   * Replaces a decided proposal with one short line: the preview and the
-   * message with buttons are deleted, and a single message states the outcome.
-   * Once collapsed, later updates (a reject reason) edit that line in place.
-   * If Telegram refuses the deletion, the message with buttons is edited instead.
+   * Replaces a decided story with one short line: the original news, the
+   * preview and the message with buttons are deleted, and a single message
+   * states the outcome. Once collapsed, later updates (a reject reason) edit
+   * that line in place. A story turned down before its draft has only the
+   * original news, which is edited into the line. If Telegram refuses the
+   * deletion, the message with buttons is edited instead and the original
+   * loses its button.
    */
   async collapse(story, html3, keyboard) {
-    if (story.proposal_chat_id === null || story.proposal_message_ids === null) return;
-    let ids = [];
-    try {
-      ids = JSON.parse(story.proposal_message_ids);
-    } catch {
-      return;
-    }
-    if (ids.length <= 1) {
-      await this.editControl(story, html3, keyboard);
-      return;
-    }
     const api = this.engine.api(await this.engine.config());
-    if (api === null) return;
-    try {
-      await api.deleteMessages(story.proposal_chat_id, ids);
-    } catch {
+    const ids = this.proposalIds(story);
+    const card = this.sourceCard(story);
+    const store = this.engine.store;
+    if (ids.length === 0) {
+      if (card === null || api === null) return;
+      try {
+        await api.editText(card.chatId, card.messageId, html3, keyboard);
+      } catch {
+      }
+      store.updateStory(story.id, {
+        proposal_chat_id: card.chatId,
+        proposal_message_ids: JSON.stringify([card.messageId]),
+        source_chat_id: null,
+        source_message_id: null
+      });
+      return;
+    }
+    if (ids.length === 1 || api === null || story.proposal_chat_id === null) {
       await this.editControl(story, html3, keyboard);
       return;
     }
+    const chatId = story.proposal_chat_id;
+    let deleted = true;
     try {
-      const sent = await api.sendText(story.proposal_chat_id, html3, { disablePreview: true, ...keyboard === null ? {} : { keyboard } });
-      this.engine.store.updateStory(story.id, { proposal_message_ids: JSON.stringify([sent.message_id]) });
+      await api.deleteMessages(chatId, ids);
     } catch {
-      this.engine.store.updateStory(story.id, { proposal_message_ids: JSON.stringify([]) });
+      deleted = false;
+      await this.editControl(story, html3, keyboard);
+    }
+    await this.retireSourceCard(api, story);
+    if (!deleted) {
+      store.updateStory(story.id, { source_chat_id: null, source_message_id: null });
+      return;
+    }
+    const gone = { source_chat_id: null, source_message_id: null };
+    try {
+      const sent = await api.sendText(chatId, html3, { disablePreview: true, ...keyboard === null ? {} : { keyboard } });
+      store.updateStory(story.id, { ...gone, proposal_message_ids: JSON.stringify([sent.message_id]) });
+    } catch {
+      store.updateStory(story.id, { ...gone, proposal_message_ids: JSON.stringify([]) });
     }
   }
   /** Brings the proposal in line with a decision made anywhere (bot, admin page, console). */
@@ -68333,11 +68458,11 @@ var Engine = class {
     let messages = 0;
     if (api !== null) {
       for (; ; ) {
-        const batch = this.store.listStories({ statuses: ["proposed", "publishing", "candidate", "failed"], limit: 100, offset: 0 }).filter((story) => story.proposal_message_ids !== null);
+        const batch = this.store.listStories({ statuses: ["proposed", "publishing", "candidate", "failed"], limit: 100, offset: 0 }).filter((story) => story.proposal_message_ids !== null || (story.source_message_id ?? 0) > 0);
         if (batch.length === 0) break;
         for (const story of batch) {
           messages += await this.bot.removeProposal(api, story);
-          this.store.updateStory(story.id, { proposal_chat_id: null, proposal_message_ids: null });
+          this.store.updateStory(story.id, { proposal_chat_id: null, proposal_message_ids: null, source_chat_id: null, source_message_id: null });
         }
       }
     }
@@ -68447,9 +68572,11 @@ var Engine = class {
         if (signal.aborted) return false;
         this.ownChannelLoaded = true;
       }
+      let rewriting = false;
       try {
         const rewrite = this.rewriteQueue[0];
         if (rewrite !== void 0) {
+          rewriting = true;
           await this.draft(rewrite.storyId, signal, { instruction: rewrite.instruction, rewrite: true });
           this.rewriteQueue.shift();
           worked = true;
@@ -68473,11 +68600,8 @@ var Engine = class {
             this.platform.changed();
           }
         } else {
-          const since = new Date(Date.now() - 864e5).toISOString();
-          const candidates = this.store.nextCandidates(1);
-          const next2 = candidates[0];
-          const quotaLeft = this.store.proposedSince(since) < config2.editorial.maxProposalsPerDay && (this.store.countByStatus().proposed ?? 0) < config2.editorial.maxProposalsPerDay;
-          if (next2 !== void 0 && (quotaLeft || next2.manual === 1)) {
+          const next2 = this.store.nextCandidates(1)[0];
+          if (next2 !== void 0) {
             await this.draft(next2.id, signal);
             worked = true;
           }
@@ -68489,7 +68613,7 @@ var Engine = class {
         this.pipelineFailures = 0;
       } catch (cause) {
         if (signal.aborted) return false;
-        this.rewriteQueue.shift();
+        if (rewriting) this.rewriteQueue.shift();
         this.pausePipeline(cause);
       }
     }
@@ -68504,9 +68628,17 @@ var Engine = class {
     const config2 = await this.config();
     try {
       const draft = await writeDraft(this.pipelineContext(config2, signal), story, options);
-      if (story.proposal_message_ids !== null) await this.bot.dropProposal(story);
+      const current = this.store.getStory(storyId);
+      if (current === void 0 || current.status !== "candidate" && current.status !== "proposed") {
+        this.log("info", "draft", `\u0427\u0435\u0440\u043D\u043E\u0432\u0438\u043A \u2116${storyId} \u043D\u0435 \u043D\u0443\u0436\u0435\u043D: \u043F\u043E \u0441\u044E\u0436\u0435\u0442\u0443 \u0443\u0436\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E \u0440\u0435\u0448\u0435\u043D\u0438\u0435`, storyId);
+        return;
+      }
+      if (current.proposal_message_ids !== null) await this.bot.dropProposal(current);
+      if (!this.store.transition(storyId, ["candidate", "proposed"], "proposed")) {
+        this.log("info", "draft", `\u0427\u0435\u0440\u043D\u043E\u0432\u0438\u043A \u2116${storyId} \u043D\u0435 \u043D\u0443\u0436\u0435\u043D: \u0440\u0435\u0448\u0435\u043D\u0438\u0435 \u043F\u043E \u0441\u044E\u0436\u0435\u0442\u0443 \u0443\u0436\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E`, storyId);
+        return;
+      }
       this.store.updateStory(storyId, {
-        status: "proposed",
         draft_html: draft.html,
         draft_version: story.draft_version + 1,
         draft_note: draft.note,
@@ -68521,12 +68653,14 @@ var Engine = class {
       this.platform.changed();
     } catch (cause) {
       if (signal.aborted) throw cause;
-      if (story.status === "proposed" && story.proposal_message_ids !== null) {
-        await this.bot.dropProposal(story);
+      const current = this.store.getStory(storyId);
+      if (current === void 0 || current.status !== "candidate" && current.status !== "proposed") throw cause;
+      if (current.status === "proposed" && current.proposal_message_ids !== null) {
+        await this.bot.dropProposal(current);
         this.store.updateStory(storyId, { proposal_chat_id: null, proposal_message_ids: null });
       }
-      const attempts = story.attempts + 1;
-      const failed = attempts >= 3 && story.status === "candidate";
+      const attempts = current.attempts + 1;
+      const failed = attempts >= 3 && current.status === "candidate";
       this.store.updateStory(storyId, {
         attempts,
         last_error: errorMessage(cause),
@@ -68570,14 +68704,36 @@ var Engine = class {
   async deliverProposals(signal) {
     if (Date.now() < this.deliverNotBefore) return;
     if (this.botState === "conflict") return;
+    const cards = this.store.unsentSourceCards();
     const pending = this.store.unsentProposals();
-    if (pending.length === 0) return;
+    if (cards.length === 0 && pending.length === 0) return;
     const config2 = await this.config();
     const api = this.api(config2);
     const owner = config2.telegram.ownerChatId;
     if (api === null || owner === null) return;
-    for (const story of pending) {
+    for (const listed of cards) {
       if (signal.aborted) return;
+      const story = this.store.getStory(listed.id);
+      if (story === void 0 || story.source_message_id !== null) continue;
+      if (story.status !== "candidate" && !(story.status === "proposed" && story.proposal_message_ids === null)) continue;
+      try {
+        await this.bot.sendSourceCard(api, owner, story, signal);
+      } catch (cause) {
+        if (signal.aborted) return;
+        if (cause instanceof TelegramError && cause.code === 400) {
+          this.store.updateStory(story.id, { source_chat_id: owner, source_message_id: 0 });
+          this.log("warn", "bot", `\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0438\u0441\u0445\u043E\u0434\u043D\u0443\u044E \u043D\u043E\u0432\u043E\u0441\u0442\u044C \u2116${story.id}: ${errorMessage(cause)}`, story.id);
+          continue;
+        }
+        this.deliverNotBefore = Date.now() + 6e4;
+        this.log("warn", "bot", `\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u0442\u044C \u0438\u0441\u0445\u043E\u0434\u043D\u0443\u044E \u043D\u043E\u0432\u043E\u0441\u0442\u044C \u2116${story.id} \u0432 Telegram: ${errorMessage(cause)}`, story.id);
+        return;
+      }
+    }
+    for (const listed of pending) {
+      if (signal.aborted) return;
+      const story = this.store.getStory(listed.id);
+      if (story === void 0 || story.status !== "proposed" || story.proposal_message_ids !== null) continue;
       try {
         await this.bot.sendProposal(api, owner, story, signal);
       } catch (cause) {
@@ -68617,6 +68773,8 @@ var Engine = class {
         manual: 1,
         // The owner says it is worth a post of its own, so it no longer counts as a repeat.
         duplicate_of: null,
+        // The old outcome line stays in the chat as it is. A story whose draft kept failing
+        // still has its original in the chat; the new draft will answer it.
         proposal_chat_id: null,
         proposal_message_ids: null
       });
@@ -68986,8 +69144,8 @@ var Engine = class {
     const hours = config2.editorial.proposalTtlHours;
     const cutoff = Date.now() - hours * 36e5;
     let expired = 0;
-    for (const story of this.store.listStories({ statuses: ["proposed"], limit: 100, offset: 0 })) {
-      if (new Date(story.updated_at).getTime() > cutoff || this.isRewriting(story.id)) continue;
+    for (const story of this.store.staleProposals(new Date(cutoff).toISOString(), 500)) {
+      if (this.isRewriting(story.id)) continue;
       if (!this.store.transition(story.id, ["proposed"], "filtered")) continue;
       this.store.updateStory(story.id, { reason: `\u043D\u0435 \u0440\u0430\u0441\u0441\u043C\u043E\u0442\u0440\u0435\u043D\u043E \u0437\u0430 ${hours} \u0447${story.reason ? `; \u0431\u044B\u043B\u043E: ${story.reason}` : ""}` });
       await this.bot.afterExpiry(story, hours);

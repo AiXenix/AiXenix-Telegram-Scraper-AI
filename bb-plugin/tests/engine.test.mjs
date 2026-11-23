@@ -67,15 +67,25 @@ function fakeFetch(input, init) {
   }
   if (url.hostname === "cdn.test") {
     if (url.pathname.includes("missing")) return Promise.resolve(new Response("gone", { status: 404 }));
+    if (url.pathname.includes("hold") && holdMedia !== null) {
+      holdMedia.started = true;
+      return holdMedia.released.then(() => new Response(new Uint8Array(2048).fill(7), { status: 200, headers: { "content-length": "2048" } }));
+    }
     return Promise.resolve(new Response(new Uint8Array(2048).fill(7), { status: 200, headers: { "content-length": "2048" } }));
   }
   return fetch(input, init);
 }
 
+/** Lets a test hold the draft of one story until it says so. */
+let holdDraft = null;
+/** Lets a test hold a media download (a URL with "hold" in it) until it says so. */
+let holdMedia = null;
+
 /** A rule-based stand-in for the model. */
 const fakeLlm = {
   async run(request) {
     llmCalls.push(request);
+    if (request.task === "черновик" && holdDraft !== null && request.prompt.includes(holdDraft.marker)) await holdDraft.released;
     if (request.task === "отбор") {
       const verdicts = [];
       const seen = new Map();
@@ -229,11 +239,23 @@ test("proposals reach the owner as a preview with media and a message with butto
   assert.deepEqual(barControl.keyboard.flat().map((button) => button.text), ["✅ Разместить", "❌ Отказать", "🔁 Другой вариант", "✏️ Править"]);
   const bazPreview = toOwner(state).find((message) => message.message_id === controlOf(state, baz.id).reply_to);
   assert.equal(bazPreview.media.kind, "video");
+
+  // The original news came first, the moment the story passed the filter, and the draft answers it.
+  const barCard = toOwner(state).find((message) => message.message_id === store.getStory(bar.id).source_message_id);
+  assert.ok(barCard, "the original news was sent");
+  assert.match(barCard.visible, new RegExp(`^🆕 №${bar.id} · @alpha и ещё 1\nСюжет bar2\n\nКомпания Foo выпустила модель Bar 2`, "u"));
+  assert.match(barCard.visible, /✍️ Пост от ИИ пришлю ответом на это сообщение\.$/u);
+  assert.equal(barCard.preview_url, "https://t.me/alpha/101", "the preview shows the original post with its picture");
+  assert.deepEqual(barCard.keyboard.flat().map((button) => button.text), ["❌ Отказать"]);
+  assert.ok(barCard.message_id < barPreview.message_id, "the original comes before the draft");
+  assert.equal(barPreview.reply_to, barCard.message_id, "the draft is a reply to the original");
+  assert.equal(bazPreview.reply_to, store.getStory(baz.id).source_message_id);
 });
 
 test("the Publish button posts to the channel, reusing the uploaded media", async () => {
   const bar = storyByTitle("Сюжет bar2");
   const control = controlOf(await mockState(), bar.id);
+  const cardId = store.getStory(bar.id).source_message_id;
   await press(`p:${bar.id}`, control.message_id);
   const state = await until(async () => {
     const current = await mockState();
@@ -245,7 +267,7 @@ test("the Publish button posts to the channel, reusing the uploaded media", asyn
   const after = store.getStory(bar.id);
   assert.equal(after.status, "published");
   assert.equal(after.published_url, `https://t.me/test_channel/${published.message_id}`);
-  const proposalIds = [control.reply_to, control.message_id];
+  const proposalIds = [cardId, control.reply_to, control.message_id];
   const outcome = await until(async () => {
     const owner = toOwner(await mockState());
     if (owner.some((m) => proposalIds.includes(m.message_id))) return null;
@@ -309,6 +331,7 @@ test("a forwarded post is drafted out of turn; Another variant and Edit work", a
   await until(async () => toOwner(await mockState()).some((m) => /Принял, готовлю пост/u.test(m.visible)), "manual material accepted");
   const story = store.db.prepare("SELECT * FROM stories WHERE manual = 1 AND score = 100 ORDER BY id DESC").get();
   assert.equal(story.status, "candidate");
+  assert.equal(story.source_message_id, null, "a forwarded post is not echoed back as the original");
   await drain();
   let state = await until(async () => {
     const current = await mockState();
@@ -519,4 +542,109 @@ test("media that cannot be downloaded does not block the proposal", async () => 
   const preview = toOwner(state).find((message) => message.message_id === control.reply_to);
   assert.equal(preview.media, undefined, "the preview is text only");
   assert.match(control.visible, /Медиа не приложено/u);
+});
+
+test("the original news reaches the owner before the model starts writing", async () => {
+  channels.alpha.push({ id: 150, minutesAgo: 6, html: "Музей Quux запустил экскурсии в виртуальной реальности по залам с древними рукописями и старинными картами." });
+  await engine.collectOnce(controller.signal);
+  const drafts = llmCalls.filter((call) => call.task === "черновик").length;
+  await engine.pipelineStep(controller.signal); // the filter only
+  const story = store.db.prepare("SELECT * FROM stories ORDER BY id DESC").get();
+  assert.equal(story.status, "candidate", JSON.stringify({ title: story.title, reason: story.reason, score: story.score }));
+  assert.equal(llmCalls.filter((call) => call.task === "черновик").length, drafts, "no draft yet");
+  const card = toOwner(await mockState()).find((message) => message.message_id === store.getStory(story.id).source_message_id);
+  assert.match(card.visible, /Музей Quux запустил экскурсии/u);
+
+  // Turned down from the original: no draft is written, the card becomes the outcome line.
+  await press(`r:${story.id}`, card.message_id);
+  await until(() => store.getStory(story.id).status === "rejected", "rejected from the original");
+  await drain();
+  assert.equal(llmCalls.filter((call) => call.task === "черновик").length, drafts, "the model was not asked to write it");
+  const line = await until(async () => {
+    const message = toOwner(await mockState()).find((m) => m.message_id === card.message_id);
+    return message !== undefined && new RegExp(`^❌ Отклонено №${story.id}: «`, "u").test(message.visible) ? message : null;
+  }, "the original turned into the outcome line");
+  assert.deepEqual(line.keyboard.flat().map((button) => button.text), ["не по теме", "уже было", "слабая новость", "реклама"]);
+  assert.equal(controlOf(await mockState(), story.id), undefined, "nothing was proposed");
+});
+
+test("a story turned down while its draft is being written stays turned down", async () => {
+  channels.alpha.push({ id: 151, minutesAgo: 5, html: "Вышел открытый редактор Zeta для совместной правки промптов: история версий и сравнение ответов моделей." });
+  await engine.collectOnce(controller.signal);
+  await engine.pipelineStep(controller.signal);
+  const story = store.db.prepare("SELECT * FROM stories ORDER BY id DESC").get();
+  assert.equal(story.status, "candidate");
+  let release;
+  holdDraft = { marker: "Zeta", released: new Promise((resolve) => (release = resolve)) };
+  const drafting = engine.pipelineStep(controller.signal);
+  await until(() => llmCalls.some((call) => call.task === "черновик" && call.prompt.includes("Zeta")), "the model is writing");
+  await engine.decide(story.id, "reject");
+  release();
+  await drafting;
+  holdDraft = null;
+  await drain();
+  const after = store.getStory(story.id);
+  assert.equal(after.status, "rejected", "the finished draft did not bring it back");
+  assert.equal(after.draft_html, null);
+  assert.equal(controlOf(await mockState(), story.id), undefined, "nothing was proposed");
+  await engine.decide(story.id, "reject").catch(() => undefined);
+});
+
+test("there is no daily quota: after a busy day a new story still gets its draft at once", async () => {
+  const insert = store.db.prepare(
+    `INSERT INTO stories (status, title, summary, tokens, link_keys, draft_html, draft_version, manual, attempts, proposal_chat_id, proposal_message_ids, created_at, updated_at)
+     VALUES (?, ?, '', '', '', '<b>x</b>', 1, 0, 0, ?, '[]', ?, ?)`,
+  );
+  const at = new Date().toISOString();
+  for (let index = 0; index < 30; index += 1) insert.run(index % 2 === 0 ? "proposed" : "rejected", `Загруженный день ${index}`, OWNER, at, at);
+  channels.alpha.push({ id: 152, minutesAgo: 1, html: "Опубликован открытый датасет Omega с миллионом диалогов для обучения голосовых ассистентов." });
+  await engine.collectOnce(controller.signal);
+  await drain();
+  const story = store.db.prepare("SELECT * FROM stories WHERE title NOT LIKE 'Загруженный день%' ORDER BY id DESC").get();
+  assert.equal(story.status, "proposed", "drafted despite 30 proposals in the last day");
+  await until(async () => controlOf(await mockState(), story.id), "and sent to the owner");
+});
+
+test("turning a story down from the original while its proposal is on the way leaves nothing behind", async () => {
+  channels.alpha.push({ id: 153, minutesAgo: 1, photo: "https://cdn.test/hold-153.jpg", html: "Обсерватория Сигма опубликовала снимки кометы в высоком разрешении, архив открыт для астрономов-любителей." });
+  await engine.collectOnce(controller.signal);
+  await engine.pipelineStep(controller.signal); // filter + original
+  const story = store.db.prepare("SELECT * FROM stories ORDER BY id DESC").get();
+  const cardId = store.getStory(story.id).source_message_id;
+  assert.ok(cardId > 0, "the original was sent");
+  let release;
+  holdMedia = { started: false, released: new Promise((resolve) => (release = resolve)) };
+  const step = engine.pipelineStep(controller.signal); // draft + delivery, stuck on the picture
+  await until(() => holdMedia.started, "the proposal is being sent");
+  await press(`r:${story.id}`, cardId);
+  await until(() => store.getStory(story.id).status === "rejected", "rejected from the original");
+  release();
+  await step;
+  holdMedia = null;
+  const state = await until(async () => {
+    const current = await mockState();
+    const line = toOwner(current).find((m) => m.message_id === cardId);
+    return line !== undefined && /^❌ Отклонено/u.test(line.visible) ? current : null;
+  }, "the original became the outcome line");
+  assert.equal(controlOf(state, story.id), undefined, "no live Publish button under a rejected story");
+  assert.equal(toOwner(state).filter((m) => m.reply_to === cardId).length, 0, "the late preview was taken back");
+});
+
+test("an original too old to delete loses its button and the outcome line still appears", async () => {
+  channels.alpha.push({ id: 154, minutesAgo: 1, html: "Фермерский кооператив Тау запустил доставку сыров дронами по сельским районам области каждое утро." });
+  await engine.collectOnce(controller.signal);
+  await drain();
+  const story = store.db.prepare("SELECT * FROM stories ORDER BY id DESC").get();
+  assert.equal(story.status, "proposed", JSON.stringify({ reason: story.reason }));
+  const cardId = store.getStory(story.id).source_message_id;
+  const control = await until(async () => controlOf(await mockState(), story.id), "proposal delivered");
+  await fetch(`${mock.url}/_test/too-old`, { method: "POST", body: JSON.stringify({ ids: [cardId] }) });
+  await press(`r:${story.id}`, control.message_id);
+  const line = await until(async () => toOwner(await mockState()).find((m) => new RegExp(`^❌ Отклонено №${story.id}: «`, "u").test(m.visible) && m.message_id !== cardId), "outcome line");
+  const state = await mockState();
+  assert.ok(!toOwner(state).some((m) => m.message_id === control.message_id || m.message_id === control.reply_to), "preview and buttons deleted");
+  const card = toOwner(state).find((m) => m.message_id === cardId);
+  assert.equal(card.keyboard, null, "the original stays but cannot act any more");
+  assert.equal(store.getStory(story.id).source_message_id, null);
+  assert.ok(line.keyboard !== null, "the reason buttons are on the outcome line");
 });

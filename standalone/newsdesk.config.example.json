@@ -31,7 +31,6 @@
     "minTextLength": 15,
     "maxAgeHours": 36,
     "memoryDays": 21,
-    "maxProposalsPerDay": 20,
     "proposalTtlHours": 48
   },
   "schedule": {

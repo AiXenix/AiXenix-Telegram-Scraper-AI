@@ -47,8 +47,9 @@ and publishes them only after you press **Publish** in a Telegram bot.
 | **One news hook, one proposal** | If you published "Example Corp released model X", posts from other channels about the same release (what it can do, prices, opinions) are not proposed again. A genuinely new event about the same product is. |
 | **Does not judge your taste** | By default every new news hook is proposed: the models only look for repeats. Besides repeats, only stale, empty or very short posts, posts marked as advertising and reposts of your own channel are skipped. A stricter mode that also filters by topic and score is one switch away. |
 | **Writes in your voice** | Drafts follow your style guide and the latest posts of your channel, keep the source's links and facts, and add your signature. |
-| **You decide** | Each draft arrives in the bot exactly as it will be published, with **✅ Publish**, **❌ Reject**, **🔁 Another variant** and **✏️ Edit** buttons. |
-| **A clean chat** | After a decision the preview and the buttons are deleted; one line with the outcome remains. |
+| **The original at once** | The moment a news hook passes the filter, the bot sends you the original post (source, text, link with its picture) with a **❌ Reject** button, before any model writes a word. There is no daily limit: everything new arrives as it appears. |
+| **You decide** | The draft follows as a reply to the original, exactly as it will be published, with **✅ Publish**, **❌ Reject**, **🔁 Another variant** and **✏️ Edit** buttons. |
+| **A clean chat** | After a decision the original, the preview and the buttons are deleted; one line with the outcome remains. |
 | **Hand-picked posts** | Forward any post to the bot and it is drafted out of turn. If it is already on your channel, the bot says so. |
 | **Admin page** | Queue, sources, history, filtered list with reasons, settings and status, all in one page (bb plugin). |
 | **Two ways to run** | As a plugin inside [bb](https://getbb.app) or as one standalone Node.js file. Both use the same code and the same config file. |
@@ -62,8 +63,9 @@ flowchart LR
     P --> F["Filter model<br/>repeat of a known news hook?"]
     M[("Memory<br/>published · proposed · rejected<br/>posts of your channel")] --- F
     F -->|"repeat"| X["Filtered list<br/>with the reason"]
-    F -->|"new"| W["Writer model<br/>draft in your channel's voice"]
-    W --> B["Telegram bot<br/>preview + buttons"]
+    F -->|"new"| O["Telegram bot<br/>original news + ❌ Reject"]
+    O --> W["Writer model<br/>draft in your channel's voice"]
+    W --> B["Telegram bot<br/>preview + buttons,<br/>a reply to the original"]
     B -->|"✅ Publish"| CH["Your channel"]
     B -->|"❌ Reject"| M
     CH --> M
@@ -72,9 +74,10 @@ flowchart LR
 1. **Collect.** Each source is read through its public web preview (`t.me/s/<channel>`). No Telegram account or session is used.
 2. **Cheap checks.** Posts older than `maxAgeHours`, posts with no text, very short posts without media and posts marked as advertising are skipped without a model call. A post whose text is identical to one already seen is recorded as its repeat.
 3. **Repeat check.** Up to 10 posts at a time go to the filter model together with the titles of recent stories (published, proposed, rejected and the posts of your own channel) and the closest look-alikes by shared words and links. The model answers "repeat of story N" or "new". Repeats go to the filtered list with a line saying what they repeat.
-4. **Draft.** The writer model gets your style guide, up to six recent posts of your channel as examples and up to four source posts about the story, and writes one post within Telegram's limits (1024 characters under a photo or video).
-5. **Proposal.** The bot sends you the post with its media, then a message with buttons.
-6. **Decision.** **Publish** posts to your channel and remembers it; **Reject** asks for an optional reason; both leave one outcome line in the chat. A proposal nobody decided on within 48 hours moves to the filtered list.
+4. **The original, at once.** As soon as a post is found to be a new news hook, the bot sends you the original: the source, the title, the post's text and a link to it with its picture, plus a **❌ Reject** button. Turn it down here and no draft is written.
+5. **Draft.** The writer model gets your style guide, up to six recent posts of your channel as examples and up to four source posts about the story, and writes one post within Telegram's limits (1024 characters under a photo or video).
+6. **Proposal.** The bot sends the post with its media as a reply to the original, then a message with buttons. Every story is drafted as soon as it comes; there is no daily quota.
+7. **Decision.** **Publish** posts to your channel and remembers it; **Reject** asks for an optional reason; both leave one outcome line in the chat. A proposal nobody decided on within 48 hours moves to the filtered list.
 
 ## Screenshots
 
@@ -302,7 +305,6 @@ The default model names are those of bb's Codex provider. With another backend, 
 | `minTextLength` | `15` | Posts without media and with less text than this are skipped. |
 | `maxAgeHours` | `36` | Posts older than this when collected are skipped. |
 | `memoryDays` | `21` | How far back stories block repeats. |
-| `maxProposalsPerDay` | `20` | Drafts per day, and the most proposals waiting at once. |
 | `proposalTtlHours` | `48` | A proposal with no decision after this moves to the filtered list. |
 
 </details>

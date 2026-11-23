@@ -5,6 +5,7 @@
 // Besides the Bot API paths (/bot<token>/<method>) it has test controls:
 //   POST /_test/update   deliver an update to the bot ({ message } or { callback_query })
 //   GET  /_test/state    everything the bot has sent so far
+//   POST /_test/too-old  {"ids": [...]} messages that, like real ones over 48 hours old, cannot be deleted
 import { createServer } from "node:http";
 
 const ALLOWED_TAGS = new Set(["b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a", "blockquote", "tg-spoiler"]);
@@ -74,6 +75,7 @@ export function startMockTelegram({ port = 0, longPollMs = 800 } = {}) {
     calls: [],
     answers: [],
     deleted: [],
+    tooOld: new Set(),
     waiters: [],
   };
 
@@ -145,17 +147,27 @@ export function startMockTelegram({ port = 0, longPollMs = 800 } = {}) {
       const visible = parseTelegramHtml(params.text);
       if (visible.length > 4096) throw new Error("Bad Request: message is too long");
       const keyboard = params.reply_markup?.inline_keyboard ?? null;
-      return apiMessage(record(chatId, { text: params.text, visible, keyboard, reply_to: params.reply_parameters?.message_id ?? null }));
+      const preview = params.link_preview_options ?? null;
+      if (preview?.url !== undefined && !/^https?:\/\//u.test(preview.url)) throw new Error("Bad Request: wrong link preview url");
+      return apiMessage(
+        record(chatId, {
+          text: params.text,
+          visible,
+          keyboard,
+          reply_to: params.reply_parameters?.message_id ?? null,
+          preview_url: preview?.is_disabled === true ? null : (preview?.url ?? null),
+        }),
+      );
     },
     sendPhoto(params, files) {
       const chatId = requireChat(params);
       const media = mediaInput(params, files, "photo", "photo");
-      return apiMessage(record(chatId, { media, ...caption(params, 1024) }));
+      return apiMessage(record(chatId, { media, reply_to: params.reply_parameters?.message_id ?? null, ...caption(params, 1024) }));
     },
     sendVideo(params, files) {
       const chatId = requireChat(params);
       const media = mediaInput(params, files, "video", "video");
-      return apiMessage(record(chatId, { media, ...caption(params, 1024) }));
+      return apiMessage(record(chatId, { media, reply_to: params.reply_parameters?.message_id ?? null, ...caption(params, 1024) }));
     },
     sendMediaGroup(params, files) {
       const chatId = requireChat(params);
@@ -166,7 +178,7 @@ export function startMockTelegram({ port = 0, longPollMs = 800 } = {}) {
         if (item.type !== "photo" && item.type !== "video") throw new Error("Bad Request: wrong type of the media");
         const media = mediaInput({ media: item.media }, files, "media", item.type);
         if (index > 0 && item.caption !== undefined) throw new Error("Bad Request: test server expects the caption on the first item only");
-        return apiMessage(record(chatId, { media, group, ...(index === 0 ? caption(item, 1024) : {}) }));
+        return apiMessage(record(chatId, { media, group, reply_to: index === 0 ? (params.reply_parameters?.message_id ?? null) : null, ...(index === 0 ? caption(item, 1024) : {}) }));
       });
     },
     editMessageText(params) {
@@ -185,6 +197,16 @@ export function startMockTelegram({ port = 0, longPollMs = 800 } = {}) {
       message.edits = (message.edits ?? 0) + 1;
       return apiMessage(message);
     },
+    editMessageReplyMarkup(params) {
+      const message = state.messages.find(
+        (candidate) => candidate.message_id === Number(params.message_id) && candidate.chat_id === String(params.chat_id),
+      );
+      if (message === undefined) throw new Error("Bad Request: message to edit not found");
+      const keyboard = params.reply_markup?.inline_keyboard ?? [];
+      if (JSON.stringify(message.keyboard ?? []) === JSON.stringify(keyboard)) throw new Error("Bad Request: message is not modified");
+      message.keyboard = keyboard.length === 0 ? null : keyboard;
+      return apiMessage(message);
+    },
     answerCallbackQuery(params) {
       state.answers.push({ id: params.callback_query_id, text: params.text ?? null, alert: params.show_alert === true });
       return true;
@@ -194,6 +216,8 @@ export function startMockTelegram({ port = 0, longPollMs = 800 } = {}) {
       const ids = params.message_ids;
       if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100) throw new Error("Bad Request: message_ids must hold 1-100 ids");
       const wanted = new Set(ids.map(Number));
+      // Like the real API: one message that is too old makes the whole call fail.
+      if (ids.some((id) => state.tooOld.has(Number(id)))) throw new Error("Bad Request: message can't be deleted for everyone");
       state.deleted.push(...ids.map(Number));
       state.messages = state.messages.filter((message) => !(message.chat_id === chatId && wanted.has(message.message_id)));
       return true;
@@ -225,6 +249,11 @@ export function startMockTelegram({ port = 0, longPollMs = 800 } = {}) {
     try {
       if (url.pathname === "/_test/state") {
         send(200, { messages: state.messages, calls: state.calls, answers: state.answers, deleted: state.deleted, pendingUpdates: state.updates.length });
+        return;
+      }
+      if (url.pathname === "/_test/too-old") {
+        for (const id of JSON.parse(body.toString("utf8")).ids ?? []) state.tooOld.add(Number(id));
+        send(200, { ok: true });
         return;
       }
       if (url.pathname === "/_test/update") {

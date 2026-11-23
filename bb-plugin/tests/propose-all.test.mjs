@@ -167,8 +167,9 @@ test("a reset forgets everything, clears the chat and watches from now on", asyn
   assert.ok(proposals.length > 0, "proposals were delivered before the reset");
   store.addOwnPost(9001, new Date().toISOString(), "Пост с нашего канала", null);
 
-  const decided = store.db.prepare("SELECT proposal_message_ids FROM stories WHERE status IN ('published', 'rejected')").all();
-  const decidedIds = decided.flatMap((row) => JSON.parse(row.proposal_message_ids ?? "[]"));
+  const decided = store.db.prepare("SELECT proposal_message_ids, source_message_id FROM stories WHERE status IN ('published', 'rejected')").all();
+  // A decided story keeps its messages: the original news (if still there) and the outcome line or proposal.
+  const decidedIds = decided.flatMap((row) => [...(row.source_message_id > 0 ? [row.source_message_id] : []), ...JSON.parse(row.proposal_message_ids ?? "[]")]);
   const result = await engine.resetFromNow(controller.signal);
   assert.ok(result.stories === 5 && result.posts === 6, JSON.stringify(result));
   assert.equal(result.messages, proposals.length - decidedIds.length, "every pending proposal was deleted from the chat");

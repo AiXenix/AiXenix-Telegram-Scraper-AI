@@ -78,7 +78,7 @@ export function entitiesToPlain(text: string, entities: TgMessageEntity[]): { te
 
 const HELP = [
   "<b>Что я умею</b>",
-  "Сам слежу за каналами из списка, отбираю новости и присылаю готовые посты с кнопками «Разместить» и «Отказать».",
+  "Сам слежу за каналами из списка. Как только появляется новость, сразу присылаю её оригинал, а следом, ответом на него, — готовый пост с кнопками «Разместить» и «Отказать». Неинтересное можно отклонить сразу, не дожидаясь поста.",
   "",
   "Перешлите мне любой пост — подготовлю его вне очереди.",
   "",
@@ -109,6 +109,14 @@ function mainKeyboard(storyId: number, tag: string): InlineKeyboard {
     ],
   ];
 }
+
+/** Under the original news: it can be turned down before the draft is even written. */
+function sourceKeyboard(storyId: number, tag: string): InlineKeyboard {
+  return [[{ text: "❌ Отказать", callback_data: `r:${storyId}@${tag}` }]];
+}
+
+/** Room for the original's text in a message of 4096 characters, after the header and the last line. */
+const SOURCE_TEXT_LIMIT = 3500;
 
 function editKeyboard(storyId: number, tag: string): InlineKeyboard {
   return [
@@ -176,14 +184,78 @@ export class BotController {
     return lines.join("\n");
   }
 
-  private controlMessageId(story: StoryRow): { chatId: number; messageId: number } | null {
-    if (story.proposal_chat_id === null || story.proposal_message_ids === null) return null;
+  /** The message with the original news, if one was sent to this chat. */
+  private sourceCard(story: StoryRow): { chatId: number; messageId: number } | null {
+    if (story.source_chat_id === null || story.source_message_id === null || story.source_message_id <= 0) return null;
+    return { chatId: story.source_chat_id, messageId: story.source_message_id };
+  }
+
+  /** The preview and the message with buttons (or, once decided, the outcome line). */
+  private proposalIds(story: StoryRow): number[] {
+    if (story.proposal_chat_id === null || story.proposal_message_ids === null) return [];
     try {
-      const ids = JSON.parse(story.proposal_message_ids) as number[];
-      const last = ids[ids.length - 1];
-      return last === undefined ? null : { chatId: story.proposal_chat_id, messageId: last };
+      return JSON.parse(story.proposal_message_ids) as number[];
     } catch {
-      return null;
+      return [];
+    }
+  }
+
+  /** The message with buttons, to edit in place. Only the proposal's own message: never the original news. */
+  private controlMessageId(story: StoryRow): { chatId: number; messageId: number } | null {
+    const last = this.proposalIds(story).at(-1);
+    return story.proposal_chat_id === null || last === undefined ? null : { chatId: story.proposal_chat_id, messageId: last };
+  }
+
+  /**
+   * Takes the original news out of the chat. It is deleted on its own, not in
+   * one call with newer messages: Telegram refuses a whole batch if one message
+   * is older than 48 hours. If it cannot be deleted, its button is taken away
+   * so it can no longer act. Returns 1 when the message went.
+   */
+  private async retireSourceCard(api: TelegramApi, story: StoryRow): Promise<number> {
+    const card = this.sourceCard(story);
+    if (card === null) return 0;
+    try {
+      await api.deleteMessages(card.chatId, [card.messageId]);
+      return 1;
+    } catch {
+      await api
+        .call("editMessageReplyMarkup", { chat_id: card.chatId, message_id: card.messageId, reply_markup: { inline_keyboard: [] } })
+        .catch(() => undefined);
+      return 0;
+    }
+  }
+
+  /**
+   * Shows the owner the original news the moment it passes the filter, before
+   * the model has written anything: source, title, the post's own text and its
+   * preview with the picture. The draft comes later as a reply to this message.
+   */
+  async sendSourceCard(api: TelegramApi, ownerChatId: number, story: StoryRow, signal: AbortSignal): Promise<void> {
+    const posts = this.engine.store.postsOfStory(story.id);
+    const first = posts[0];
+    const lines: string[] = [];
+    if (first === undefined) {
+      lines.push(`🆕 <b>№${story.id}</b>`);
+    } else {
+      const label = `@${first.source_handle}`;
+      const link = first.url === "" ? escapeHtml(label) : `<a href="${escapeHtml(first.url)}">${escapeHtml(label)}</a>`;
+      lines.push(`🆕 <b>№${story.id}</b> · ${link}${posts.length > 1 ? ` и ещё ${posts.length - 1}` : ""}`);
+    }
+    lines.push(`<b>${escapeHtml(story.title)}</b>`);
+    const original = (first?.text ?? story.summary).trim();
+    if (original !== "") lines.push("", escapeHtml(truncate(original, SOURCE_TEXT_LIMIT)));
+    lines.push("", "<i>✍️ Пост от ИИ пришлю ответом на это сообщение.</i>");
+    const previewUrl = first !== undefined && first.url !== "" ? first.url : undefined;
+    const card = await api.sendText(
+      ownerChatId,
+      lines.join("\n"),
+      { keyboard: sourceKeyboard(story.id, this.tag()), ...(previewUrl === undefined ? { disablePreview: true } : { previewUrl }) },
+      { signal },
+    );
+    if (!this.engine.store.claimSourceCard(story.id, ownerChatId, card.message_id)) {
+      // Decided while the message was on its way: take it back.
+      await api.deleteMessages(ownerChatId, [card.message_id]).catch(() => undefined);
     }
   }
 
@@ -191,15 +263,17 @@ export class BotController {
   async sendProposal(api: TelegramApi, ownerChatId: number, story: StoryRow, signal: AbortSignal): Promise<void> {
     if (story.draft_html === null) return;
     const store = this.engine.store;
+    const card = this.sourceCard(story);
+    const replyTo = card !== null && card.chatId === ownerChatId ? { replyTo: card.messageId } : {};
     let sent;
     let mediaNote: string | null = null;
     try {
-      sent = await sendPost(api, this.engine.platform.fetch, ownerChatId, story.draft_html, this.engine.mediaFor(story), signal);
+      sent = await sendPost(api, this.engine.platform.fetch, ownerChatId, story.draft_html, this.engine.mediaFor(story), signal, replyTo);
     } catch (cause) {
       if (!(cause instanceof MediaError)) throw cause;
       mediaNote = `Медиа не приложено: ${cause.message}.`;
       store.updateStory(story.id, { media_post_id: null, proposal_media: null });
-      sent = await sendPost(api, this.engine.platform.fetch, ownerChatId, story.draft_html, [], signal);
+      sent = await sendPost(api, this.engine.platform.fetch, ownerChatId, story.draft_html, [], signal, replyTo);
     }
     const control = await api.sendText(
       ownerChatId,
@@ -207,11 +281,11 @@ export class BotController {
       { keyboard: mainKeyboard(story.id, this.tag()), replyTo: sent.messageIds[0], disablePreview: true },
       { signal },
     );
-    store.updateStory(story.id, {
-      proposal_chat_id: ownerChatId,
-      proposal_message_ids: JSON.stringify([...sent.messageIds, control.message_id]),
-      proposal_media: sent.media.length > 0 ? JSON.stringify(sent.media) : null,
-    });
+    const ids = [...sent.messageIds, control.message_id];
+    if (!store.claimProposal(story.id, ownerChatId, ids, sent.media.length > 0 ? JSON.stringify(sent.media) : null)) {
+      // The owner decided (for example, turned it down from the original) while this was being sent.
+      await api.deleteMessages(ownerChatId, ids).catch(() => undefined);
+    }
   }
 
   private async editControl(story: StoryRow, html: string, keyboard: InlineKeyboard | null): Promise<void> {
@@ -227,26 +301,25 @@ export class BotController {
   }
 
   /**
-   * Takes a proposal out of the owner's chat: deletes its preview and its
-   * message with buttons. Returns how many messages went. If Telegram refuses
-   * (messages older than 48 hours cannot be deleted), the buttons are removed instead.
+   * Takes a story out of the owner's chat: deletes the preview and the
+   * message with buttons, and the original news unless keepSource (a new
+   * variant of the draft replaces only the preview). Returns how many messages
+   * went. If Telegram refuses (messages older than 48 hours cannot be
+   * deleted), the buttons are removed instead.
    */
-  async removeProposal(api: TelegramApi, story: StoryRow): Promise<number> {
-    if (story.proposal_chat_id === null || story.proposal_message_ids === null) return 0;
-    let ids: number[] = [];
-    try {
-      ids = JSON.parse(story.proposal_message_ids) as number[];
-    } catch {
-      return 0;
+  async removeProposal(api: TelegramApi, story: StoryRow, options: { keepSource?: boolean } = {}): Promise<number> {
+    let removed = 0;
+    const ids = this.proposalIds(story);
+    if (story.proposal_chat_id !== null && ids.length > 0) {
+      try {
+        await api.deleteMessages(story.proposal_chat_id, ids);
+        removed += ids.length;
+      } catch {
+        await this.retireProposal(story, "снято");
+      }
     }
-    if (ids.length === 0) return 0;
-    try {
-      await api.deleteMessages(story.proposal_chat_id, ids);
-      return ids.length;
-    } catch {
-      await this.retireProposal(story, "снято");
-      return 0;
-    }
+    if (options.keepSource !== true) removed += await this.retireSourceCard(api, story);
+    return removed;
   }
 
   /** Marks an outdated proposal so its buttons cannot be pressed by mistake. */
@@ -254,11 +327,11 @@ export class BotController {
     return this.editControl(story, `<b>№${story.id}</b> · ${escapeHtml(label)}`, null);
   }
 
-  /** Deletes a proposal's messages from the chat (used when a new variant replaces it). */
+  /** Deletes a proposal's preview and buttons when a new variant replaces it; the original news stays. */
   async dropProposal(story: StoryRow): Promise<void> {
     const api = this.engine.api(await this.engine.config());
     if (api === null) return;
-    await this.removeProposal(api, story);
+    await this.removeProposal(api, story, { keepSource: true });
   }
 
   /** The first words of the post, for the one-line outcome message. */
@@ -269,36 +342,58 @@ export class BotController {
   }
 
   /**
-   * Replaces a decided proposal with one short line: the preview and the
-   * message with buttons are deleted, and a single message states the outcome.
-   * Once collapsed, later updates (a reject reason) edit that line in place.
-   * If Telegram refuses the deletion, the message with buttons is edited instead.
+   * Replaces a decided story with one short line: the original news, the
+   * preview and the message with buttons are deleted, and a single message
+   * states the outcome. Once collapsed, later updates (a reject reason) edit
+   * that line in place. A story turned down before its draft has only the
+   * original news, which is edited into the line. If Telegram refuses the
+   * deletion, the message with buttons is edited instead and the original
+   * loses its button.
    */
   private async collapse(story: StoryRow, html: string, keyboard: InlineKeyboard | null): Promise<void> {
-    if (story.proposal_chat_id === null || story.proposal_message_ids === null) return;
-    let ids: number[] = [];
-    try {
-      ids = JSON.parse(story.proposal_message_ids) as number[];
-    } catch {
-      return;
-    }
-    if (ids.length <= 1) {
-      await this.editControl(story, html, keyboard);
-      return;
-    }
     const api = this.engine.api(await this.engine.config());
-    if (api === null) return;
-    try {
-      await api.deleteMessages(story.proposal_chat_id, ids);
-    } catch {
+    const ids = this.proposalIds(story);
+    const card = this.sourceCard(story);
+    const store = this.engine.store;
+    if (ids.length === 0) {
+      if (card === null || api === null) return;
+      // Only the original is in the chat: it becomes the outcome line, and from now on counts as one.
+      try {
+        await api.editText(card.chatId, card.messageId, html, keyboard);
+      } catch {
+        // Unchanged or gone; the decision itself is saved.
+      }
+      store.updateStory(story.id, {
+        proposal_chat_id: card.chatId,
+        proposal_message_ids: JSON.stringify([card.messageId]),
+        source_chat_id: null,
+        source_message_id: null,
+      });
+      return;
+    }
+    if (ids.length === 1 || api === null || story.proposal_chat_id === null) {
       await this.editControl(story, html, keyboard);
       return;
     }
+    const chatId = story.proposal_chat_id;
+    let deleted = true;
     try {
-      const sent = await api.sendText(story.proposal_chat_id, html, { disablePreview: true, ...(keyboard === null ? {} : { keyboard }) });
-      this.engine.store.updateStory(story.id, { proposal_message_ids: JSON.stringify([sent.message_id]) });
+      await api.deleteMessages(chatId, ids);
     } catch {
-      this.engine.store.updateStory(story.id, { proposal_message_ids: JSON.stringify([]) });
+      deleted = false;
+      await this.editControl(story, html, keyboard);
+    }
+    await this.retireSourceCard(api, story);
+    if (!deleted) {
+      store.updateStory(story.id, { source_chat_id: null, source_message_id: null });
+      return;
+    }
+    const gone = { source_chat_id: null, source_message_id: null };
+    try {
+      const sent = await api.sendText(chatId, html, { disablePreview: true, ...(keyboard === null ? {} : { keyboard }) });
+      store.updateStory(story.id, { ...gone, proposal_message_ids: JSON.stringify([sent.message_id]) });
+    } catch {
+      store.updateStory(story.id, { ...gone, proposal_message_ids: JSON.stringify([]) });
     }
   }
 

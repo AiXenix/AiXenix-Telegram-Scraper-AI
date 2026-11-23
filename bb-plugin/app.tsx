@@ -653,7 +653,6 @@ function SettingsTab({ rpc, overview, onChanged }: { rpc: Rpc; overview: Overvie
             <Input value={config.editorial.footer} onChange={(event) => edit((draft) => { draft.editorial.footer = event.target.value; })} />
           </Field>
           <NumberField label="Порог оценки" hint={config.editorial.proposeAll ? "Не используется, пока включено «Предлагать все новости»." : "Ниже — в отсев. От 0 до 100."} min={0} max={100} value={config.editorial.minScore} onChange={(value) => edit((draft) => { draft.editorial.minScore = value; })} />
-          <NumberField label="Предложений в сутки, не больше" hint="Столько же может одновременно ждать решения." min={1} max={200} value={config.editorial.maxProposalsPerDay} onChange={(value) => edit((draft) => { draft.editorial.maxProposalsPerDay = value; })} />
           <NumberField label="Ждать решения, часов" hint="Потом предложение уходит в отсев." min={1} max={720} value={config.editorial.proposalTtlHours} onChange={(value) => edit((draft) => { draft.editorial.proposalTtlHours = value; })} />
           <NumberField label="Не брать посты старше, часов" min={1} max={336} value={config.editorial.maxAgeHours} onChange={(value) => edit((draft) => { draft.editorial.maxAgeHours = value; })} />
           <NumberField label="Помнить решения, дней" hint="Опубликованное и отклонённое не предлагается повторно." min={1} max={180} value={config.editorial.memoryDays} onChange={(value) => edit((draft) => { draft.editorial.memoryDays = value; })} />

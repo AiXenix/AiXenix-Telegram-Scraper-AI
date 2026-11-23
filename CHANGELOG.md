@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-23
+
+### Added
+
+- The original news first: as soon as a story passes the filter, the bot sends the owner the original post (source, title, text, link with its picture) with a Reject button, before the draft is written. Rejecting it there skips the draft.
+- The draft preview is sent as a reply to that original.
+
+### Changed
+
+- No daily quota: every story that passes the filter is drafted and sent at once. The `editorial.maxProposalsPerDay` setting is gone; configs that still have it load as before.
+- After a decision the original news is deleted together with the preview and the buttons.
+
+### Fixed
+
+- A story rejected while its draft was being written no longer comes back as a proposal.
+
 ## [1.0.0] - 2026-11-21
 
 First public release. The repository was briefly published as `AiXenix-Telegram-Scrapper-AI`; old links redirect here.
@@ -23,5 +39,6 @@ First public release. The repository was briefly published as `AiXenix-Telegram-
 - Clean start (reset) from the admin page, `bb newsdesk reset --yes` and `newsdesk reset --yes`.
 - Tests: unit tests, an end-to-end scenario with a strict fake Telegram, and a live scenario script.
 
-[Unreleased]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/AiXenix/AiXenix-Telegram-Scraper-AI/releases/tag/v1.0.0

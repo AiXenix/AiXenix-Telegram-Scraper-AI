@@ -455,11 +455,11 @@ export class Engine {
       for (;;) {
         const batch = this.store
           .listStories({ statuses: ["proposed", "publishing", "candidate", "failed"], limit: 100, offset: 0 })
-          .filter((story) => story.proposal_message_ids !== null);
+          .filter((story) => story.proposal_message_ids !== null || (story.source_message_id ?? 0) > 0);
         if (batch.length === 0) break;
         for (const story of batch) {
           messages += await this.bot.removeProposal(api, story);
-          this.store.updateStory(story.id, { proposal_chat_id: null, proposal_message_ids: null });
+          this.store.updateStory(story.id, { proposal_chat_id: null, proposal_message_ids: null, source_chat_id: null, source_message_id: null });
         }
       }
     }
@@ -580,9 +580,11 @@ export class Engine {
         if (signal.aborted) return false;
         this.ownChannelLoaded = true;
       }
+      let rewriting = false;
       try {
         const rewrite = this.rewriteQueue[0];
         if (rewrite !== undefined) {
+          rewriting = true;
           await this.draft(rewrite.storyId, signal, { instruction: rewrite.instruction, rewrite: true });
           this.rewriteQueue.shift();
           worked = true;
@@ -606,14 +608,9 @@ export class Engine {
             this.platform.changed();
           }
         } else {
-          const since = new Date(Date.now() - 86_400_000).toISOString();
-          const candidates = this.store.nextCandidates(1);
-          const next = candidates[0];
-          // Two brakes on drafting: the daily quota, and a backlog the owner has not got to yet.
-          const quotaLeft =
-            this.store.proposedSince(since) < config.editorial.maxProposalsPerDay &&
-            (this.store.countByStatus().proposed ?? 0) < config.editorial.maxProposalsPerDay;
-          if (next !== undefined && (quotaLeft || next.manual === 1)) {
+          // No quota: every story that passed the filter gets its draft at once; the owner decides.
+          const next = this.store.nextCandidates(1)[0];
+          if (next !== undefined) {
             await this.draft(next.id, signal);
             worked = true;
           }
@@ -625,8 +622,8 @@ export class Engine {
         this.pipelineFailures = 0;
       } catch (cause) {
         if (signal.aborted) return false;
-        // A failed rewrite must not block the queue behind it forever.
-        this.rewriteQueue.shift();
+        // A failed rewrite must not block the queue behind it forever; other failures leave the queue alone.
+        if (rewriting) this.rewriteQueue.shift();
         this.pausePipeline(cause);
       }
     }
@@ -646,9 +643,18 @@ export class Engine {
     const config = await this.config();
     try {
       const draft = await writeDraft(this.pipelineContext(config, signal), story, options);
-      if (story.proposal_message_ids !== null) await this.bot.dropProposal(story);
+      // The owner may have turned the story down while the model was writing.
+      const current = this.store.getStory(storyId);
+      if (current === undefined || (current.status !== "candidate" && current.status !== "proposed")) {
+        this.log("info", "draft", `Черновик №${storyId} не нужен: по сюжету уже принято решение`, storyId);
+        return;
+      }
+      if (current.proposal_message_ids !== null) await this.bot.dropProposal(current);
+      if (!this.store.transition(storyId, ["candidate", "proposed"], "proposed")) {
+        this.log("info", "draft", `Черновик №${storyId} не нужен: решение по сюжету уже принято`, storyId);
+        return;
+      }
       this.store.updateStory(storyId, {
-        status: "proposed",
         draft_html: draft.html,
         draft_version: story.draft_version + 1,
         draft_note: draft.note,
@@ -663,13 +669,15 @@ export class Engine {
       this.platform.changed();
     } catch (cause) {
       if (signal.aborted) throw cause;
-      if (story.status === "proposed" && story.proposal_message_ids !== null) {
+      const current = this.store.getStory(storyId);
+      if (current === undefined || (current.status !== "candidate" && current.status !== "proposed")) throw cause;
+      if (current.status === "proposed" && current.proposal_message_ids !== null) {
         // The old variant's buttons were taken away for the rewrite; send it again so a decision is possible.
-        await this.bot.dropProposal(story);
+        await this.bot.dropProposal(current);
         this.store.updateStory(storyId, { proposal_chat_id: null, proposal_message_ids: null });
       }
-      const attempts = story.attempts + 1;
-      const failed = attempts >= 3 && story.status === "candidate";
+      const attempts = current.attempts + 1;
+      const failed = attempts >= 3 && current.status === "candidate";
       this.store.updateStory(storyId, {
         attempts,
         last_error: errorMessage(cause),
@@ -718,14 +726,39 @@ export class Engine {
     if (Date.now() < this.deliverNotBefore) return;
     // Another program is polling this bot: it would receive the button presses, so do not send anything.
     if (this.botState === "conflict") return;
+    const cards = this.store.unsentSourceCards();
     const pending = this.store.unsentProposals();
-    if (pending.length === 0) return;
+    if (cards.length === 0 && pending.length === 0) return;
     const config = await this.config();
     const api = this.api(config);
     const owner = config.telegram.ownerChatId;
     if (api === null || owner === null) return;
-    for (const story of pending) {
+    // The original news goes first, the moment a story passes the filter; its draft follows as a reply.
+    // Each story is read again just before sending: the owner may have decided on it meanwhile.
+    for (const listed of cards) {
       if (signal.aborted) return;
+      const story = this.store.getStory(listed.id);
+      if (story === undefined || story.source_message_id !== null) continue;
+      if (story.status !== "candidate" && !(story.status === "proposed" && story.proposal_message_ids === null)) continue;
+      try {
+        await this.bot.sendSourceCard(api, owner, story, signal);
+      } catch (cause) {
+        if (signal.aborted) return;
+        if (cause instanceof TelegramError && cause.code === 400) {
+          // Telegram will not take this card (odd text, broken link): skip it, the draft still comes.
+          this.store.updateStory(story.id, { source_chat_id: owner, source_message_id: 0 });
+          this.log("warn", "bot", `Не удалось показать исходную новость №${story.id}: ${errorMessage(cause)}`, story.id);
+          continue;
+        }
+        this.deliverNotBefore = Date.now() + 60_000;
+        this.log("warn", "bot", `Не удалось отправить исходную новость №${story.id} в Telegram: ${errorMessage(cause)}`, story.id);
+        return;
+      }
+    }
+    for (const listed of pending) {
+      if (signal.aborted) return;
+      const story = this.store.getStory(listed.id);
+      if (story === undefined || story.status !== "proposed" || story.proposal_message_ids !== null) continue;
       try {
         await this.bot.sendProposal(api, owner, story, signal);
       } catch (cause) {
@@ -771,6 +804,8 @@ export class Engine {
         manual: 1,
         // The owner says it is worth a post of its own, so it no longer counts as a repeat.
         duplicate_of: null,
+        // The old outcome line stays in the chat as it is. A story whose draft kept failing
+        // still has its original in the chat; the new draft will answer it.
         proposal_chat_id: null,
         proposal_message_ids: null,
       });
@@ -1202,8 +1237,9 @@ export class Engine {
     const hours = config.editorial.proposalTtlHours;
     const cutoff = Date.now() - hours * 3_600_000;
     let expired = 0;
-    for (const story of this.store.listStories({ statuses: ["proposed"], limit: 100, offset: 0 })) {
-      if (new Date(story.updated_at).getTime() > cutoff || this.isRewriting(story.id)) continue;
+    // Oldest first and without a cap on how many wait: with no daily quota the queue can grow long.
+    for (const story of this.store.staleProposals(new Date(cutoff).toISOString(), 500)) {
+      if (this.isRewriting(story.id)) continue;
       if (!this.store.transition(story.id, ["proposed"], "filtered")) continue;
       this.store.updateStory(story.id, { reason: `не рассмотрено за ${hours} ч${story.reason ? `; было: ${story.reason}` : ""}` });
       await this.bot.afterExpiry(story, hours);

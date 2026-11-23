@@ -59,10 +59,13 @@ export async function sendPost(
   html: string,
   media: StoredMedia[],
   signal?: AbortSignal,
+  options: { replyTo?: number } = {},
 ): Promise<SentPost> {
   const items = media.filter((item) => item.kind === "photo" || item.kind === "video").slice(0, 10);
+  const reply =
+    options.replyTo === undefined ? {} : { reply_parameters: { message_id: options.replyTo, allow_sending_without_reply: true } };
   if (items.length === 0) {
-    const message = await api.sendText(chatId, html, {}, { signal });
+    const message = await api.sendText(chatId, html, options.replyTo === undefined ? {} : { replyTo: options.replyTo }, { signal });
     return { messageIds: [message.message_id], media: [] };
   }
   if (visibleLength(html) > CAPTION_LIMIT) {
@@ -99,6 +102,7 @@ export async function sendPost(
         caption: html,
         parse_mode: "HTML",
         ...(isVideo ? { supports_streaming: true } : {}),
+        ...reply,
       };
       const method = isVideo ? "sendVideo" : "sendPhoto";
       const message =
@@ -116,7 +120,7 @@ export async function sendPost(
       media: references[index],
       ...(index === 0 ? { caption: html, parse_mode: "HTML" } : {}),
     }));
-    const params = { chat_id: chatId, media: group };
+    const params = { chat_id: chatId, media: group, ...reply };
     const messages =
       files.length === 0
         ? await api.call<TgMessage[]>("sendMediaGroup", params, { signal })

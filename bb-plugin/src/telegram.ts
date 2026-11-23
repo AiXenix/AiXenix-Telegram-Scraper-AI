@@ -234,16 +234,23 @@ export class TelegramApi {
   sendText(
     chatId: number | string,
     html: string,
-    extra: { keyboard?: InlineKeyboard; replyTo?: number; disablePreview?: boolean } = {},
+    extra: { keyboard?: InlineKeyboard; replyTo?: number; disablePreview?: boolean; previewUrl?: string } = {},
     options?: CallOptions,
   ): Promise<TgMessage> {
+    // previewUrl: show the preview of this address (with its picture large) whatever other links the text has.
+    const preview =
+      extra.disablePreview === true
+        ? { link_preview_options: { is_disabled: true } }
+        : extra.previewUrl === undefined
+          ? {}
+          : { link_preview_options: { url: extra.previewUrl, prefer_large_media: true } };
     return this.call<TgMessage>(
       "sendMessage",
       {
         chat_id: chatId,
         text: html,
         parse_mode: "HTML",
-        ...(extra.disablePreview === true ? { link_preview_options: { is_disabled: true } } : {}),
+        ...preview,
         ...(extra.keyboard === undefined ? {} : { reply_markup: { inline_keyboard: extra.keyboard } }),
         ...(extra.replyTo === undefined
           ? {}

@@ -107,6 +107,8 @@ export const MIGRATIONS: string[] = [
      value TEXT NOT NULL
    )`,
   `ALTER TABLE stories ADD COLUMN duplicate_of INTEGER`,
+  `ALTER TABLE stories ADD COLUMN source_chat_id INTEGER`,
+  `ALTER TABLE stories ADD COLUMN source_message_id INTEGER`,
 ];
 
 /**
@@ -180,6 +182,13 @@ export interface StoryRow {
   proposal_message_ids: string | null;
   /** For a repeat that was dropped: the story it repeats. */
   duplicate_of: number | null;
+  /**
+   * The message with the original news, sent to the owner as soon as the story
+   * passes the filter, before the draft exists. 0 when it could not be sent and
+   * is not retried; null when it has not been sent.
+   */
+  source_chat_id: number | null;
+  source_message_id: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -432,15 +441,46 @@ export class Store {
       .prepare(`SELECT * FROM stories WHERE status = 'candidate' ORDER BY COALESCE(score, 0) DESC, id ASC LIMIT ?`)
       .all(limit) as StoryRow[];
   }
-  proposedSince(sinceIso: string): number {
-    return (
-      this.db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM stories
-           WHERE status IN ('proposed', 'publishing', 'published', 'rejected') AND draft_version > 0 AND created_at >= ?`,
-        )
-        .get(sinceIso) as { n: number }
-    ).n;
+  /**
+   * Stories that passed the filter on their own and whose original news has
+   * not been shown to the owner yet. A story drafted while Telegram was out of
+   * reach still gets its original first, before its proposal goes out.
+   */
+  unsentSourceCards(): StoryRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM stories
+         WHERE manual = 0 AND source_message_id IS NULL
+           AND (status = 'candidate' OR (status = 'proposed' AND proposal_message_ids IS NULL))
+         ORDER BY id ASC LIMIT 20`,
+      )
+      .all() as StoryRow[];
+  }
+  /** Records a sent original only if the story still waits for it; false means the story moved on meanwhile. */
+  claimSourceCard(id: number, chatId: number, messageId: number): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE stories SET source_chat_id = ?, source_message_id = ?, updated_at = ?
+         WHERE id = ? AND source_message_id IS NULL AND status IN ('candidate', 'proposed')`,
+      )
+      .run(chatId, messageId, nowIso(), id);
+    return Number(info.changes) > 0;
+  }
+  /** Records a sent proposal only if the story still waits for a decision and has none in the chat. */
+  claimProposal(id: number, chatId: number, messageIds: number[], media: string | null): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE stories SET proposal_chat_id = ?, proposal_message_ids = ?, proposal_media = ?, updated_at = ?
+         WHERE id = ? AND status = 'proposed' AND proposal_message_ids IS NULL`,
+      )
+      .run(chatId, JSON.stringify(messageIds), media, nowIso(), id);
+    return Number(info.changes) > 0;
+  }
+  /** Proposals that have waited longer than the cutoff, oldest first. */
+  staleProposals(cutoffIso: string, limit: number): StoryRow[] {
+    return this.db
+      .prepare(`SELECT * FROM stories WHERE status = 'proposed' AND updated_at < ? ORDER BY updated_at ASC LIMIT ?`)
+      .all(cutoffIso, limit) as StoryRow[];
   }
   unsentProposals(): StoryRow[] {
     return this.db

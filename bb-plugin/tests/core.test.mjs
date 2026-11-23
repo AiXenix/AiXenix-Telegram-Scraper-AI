@@ -363,3 +363,9 @@ test("config warnings catch placeholders and values that cannot work", () => {
   assert.match(configWarnings(badChannel, "standalone", helpers).join(" "), /telegram\.channel .* указан неверно/u);
   assert.deepEqual(configWarnings(filled, "bb", helpers), [], "inside bb the openai checks apply only when chosen");
 });
+
+test("a config written for 1.0 with the proposal quota still loads", () => {
+  const config = resolveConfig({ editorial: { maxProposalsPerDay: 20, footer: "@x" } });
+  assert.equal(config.editorial.footer, "@x");
+  assert.equal("maxProposalsPerDay" in config.editorial, false);
+});
